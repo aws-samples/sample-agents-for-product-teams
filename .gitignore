@@ -28,8 +28,9 @@ samconfig.toml
 .env.*
 !.env.example
 
-# Claude
-.claude/
+# Claude — ignore local settings but ship project slash commands
+.claude/*
+!.claude/commands/
 
 # git worktrees
 .worktrees/

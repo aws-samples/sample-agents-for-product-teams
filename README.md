@@ -90,6 +90,13 @@ From this repo, in Claude Code:
 /sdlc-agents
 ```
 
+`/sdlc-agents` is a project slash command shipped in this repo under
+[`.claude/commands/sdlc-agents.md`](.claude/commands/sdlc-agents.md) — Claude
+Code picks it up automatically when you run it from inside a clone. It loads
+the install flow from [`skills/sdlc-agents/SKILL.md`](skills/sdlc-agents/SKILL.md),
+which delegates to the narrower `skills/sdlc-agents-*/SKILL.md` skills as the
+conversation progresses.
+
 The skill will:
 
 1. Ask which PM tool, SCM, and chat platform you use
