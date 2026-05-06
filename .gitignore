@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AWS
+.aws-sam/
+cdk.out/
+samconfig.toml
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Claude
+.claude/
+
+# git worktrees
+.worktrees/
+
+# Serena (Claude Code tool) state
+.serena/
+
+# REPL state (agent local dev)
+repl_state/

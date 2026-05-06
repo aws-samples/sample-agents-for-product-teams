@@ -1,0 +1,29 @@
+name: Deploy Researcher Agent
+
+# Required GitHub Actions repository variables (Settings → Secrets and
+# variables → Actions → Variables). These are baked into the AgentCore
+# Runtime as environment variables — see agents/researcher/project_config.py
+# for what each one means.
+#   ASANA_PROJECT_GID       Asana project the agent reads from
+#   ASANA_WORKSPACE_GID     Asana workspace containing that project
+#
+# Optional: ASANA_PROJECT_NAME (cosmetic) — see deploy-workitems.yml for how
+# to add optional vars without tripping the missing-value guard.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agents/researcher/**"
+      - "agents/shared/**"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/deploy-agent.yml
+    with:
+      agent_name: researcher
+      env_vars: "ASANA_PROJECT_GID=${{ vars.ASANA_PROJECT_GID }},ASANA_WORKSPACE_GID=${{ vars.ASANA_WORKSPACE_GID }}"
+    secrets: inherit

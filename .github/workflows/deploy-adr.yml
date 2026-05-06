@@ -1,0 +1,23 @@
+name: Deploy Adr Agent
+
+# Required GitHub Actions repository variables (Settings → Secrets and
+# variables → Actions → Variables). See agents/adr/project_config.py.
+#   GITHUB_REPO   <owner>/<repo> the agent should act on
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agents/adr/**"
+      - "agents/shared/**"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    uses: ./.github/workflows/deploy-agent.yml
+    with:
+      agent_name: adr
+      env_vars: "GITHUB_REPO=${{ vars.GITHUB_REPO }}"
+    secrets: inherit

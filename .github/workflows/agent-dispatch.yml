@@ -1,0 +1,124 @@
+# Routes @agent mentions in GitHub comments to the Dispatch Router Lambda.
+# Does NOT intercept @claude mentions — those are handled by claude-code.yml.
+#
+# This is the *canonical* template. To deploy the SDLC Agent Fleet into a new
+# GitHub repo, copy this file (plus the corresponding secrets / IAM role)
+# into that repo's `.github/workflows/agent-dispatch.yml`. The role ARN on
+# line ~30 is stage-dependent — parameterize via a repo secret in production,
+# or edit in place for single-tenant demos.
+
+name: Agent Dispatch
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    if: |
+      contains(github.event.comment.body, '@workitems') ||
+      contains(github.event.comment.body, '@researcher') ||
+      contains(github.event.comment.body, '@docwriter') ||
+      contains(github.event.comment.body, '@adr') ||
+      contains(github.event.comment.body, '@uat') ||
+      contains(github.event.comment.body, '@merge') ||
+      contains(github.event.comment.body, '@triage')
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      issues: read
+      pull-requests: read
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.3
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Fetch full issue context and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Fetch full issue details
+          ISSUE_JSON=$(gh api repos/$REPO/issues/$ISSUE_NUMBER)
+          ISSUE_TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+          ISSUE_BODY=$(echo "$ISSUE_JSON" | jq -r '.body // ""')
+          ISSUE_LABELS=$(echo "$ISSUE_JSON" | jq -r '[.labels[].name] | join(", ")')
+          ISSUE_ASSIGNEES=$(echo "$ISSUE_JSON" | jq -r '[.assignees[].login] | join(", ")')
+          ISSUE_STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
+          IS_PR=$(echo "$ISSUE_JSON" | jq -r 'if .pull_request then "true" else "false" end')
+
+          # Fetch all comments on the issue/PR
+          COMMENTS=$(gh api repos/$REPO/issues/$ISSUE_NUMBER/comments \
+            --jq '.[] | "[\(.user.login) at \(.created_at)]:\n\(.body)\n"')
+
+          # Resolve agent from @mention in the comment body.
+          # Simple match order — first match wins.
+          AGENT_ID=""
+          for name in workitems researcher docwriter adr uat merge triage; do
+            if echo "$COMMENT_BODY" | grep -qiE "@${name}\b"; then
+              AGENT_ID="$name"
+              break
+            fi
+          done
+          if [ -z "$AGENT_ID" ]; then
+            echo "No known agent mentioned; nothing to do"; exit 0
+          fi
+          echo "resolved agent: $AGENT_ID"
+
+          # Build payload with full context
+          jq -n \
+            --arg source "github" \
+            --arg trigger_type "comment_mention" \
+            --arg agent_id "$AGENT_ID" \
+            --arg body "$COMMENT_BODY" \
+            --arg sender "$COMMENT_USER" \
+            --arg repo "$REPO" \
+            --arg issue_number "$ISSUE_NUMBER" \
+            --arg issue_title "$ISSUE_TITLE" \
+            --arg issue_body "$ISSUE_BODY" \
+            --arg issue_labels "$ISSUE_LABELS" \
+            --arg issue_assignees "$ISSUE_ASSIGNEES" \
+            --arg issue_state "$ISSUE_STATE" \
+            --arg is_pr "$IS_PR" \
+            --arg issue_comments "$COMMENTS" \
+            '{
+              source: $source,
+              trigger_type: $trigger_type,
+              agent_id: $agent_id,
+              body: $body,
+              instruction: $body,
+              sender: $sender,
+              context: {
+                repo: $repo,
+                issue_number: $issue_number,
+                issue_title: $issue_title,
+                issue_body: $issue_body,
+                issue_labels: $issue_labels,
+                issue_assignees: $issue_assignees,
+                issue_state: $issue_state,
+                is_pr: $is_pr,
+                issue_comments: $issue_comments
+              }
+            }' > /tmp/payload.json
+
+          aws lambda invoke \
+            --function-name dispatch-router-dev \
+            --invocation-type Event \
+            --payload fileb:///tmp/payload.json \
+            --region "${{ vars.AWS_REGION || 'us-west-2' }}" \
+            response.json
+
+          echo "Dispatched $AGENT_ID"
+          cat response.json

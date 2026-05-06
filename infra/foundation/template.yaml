@@ -1,0 +1,489 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  SDLC Agent Fleet — Phase 0 shared infrastructure.
+  DynamoDB, S3, Dispatch Router, Asana Webhook Receiver, IAM, CloudWatch.
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  WorkitemsBotGID:
+    Type: String
+    Description: Asana user GID for the Workitems bot account
+
+  AgentFieldGID:
+    Type: String
+    Description: Asana custom field GID for the "Agent" dropdown
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # DynamoDB — Assignment Tracking
+  # ---------------------------------------------------------------------------
+
+  AssignmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub dispatch-assignments-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: assignment_id
+          AttributeType: S
+        - AttributeName: agent_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: source
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: "N"
+      KeySchema:
+        - AttributeName: assignment_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: agent_id-status-index
+          KeySchema:
+            - AttributeName: agent_id
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: source-created_at-index
+          KeySchema:
+            - AttributeName: source
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: sdlc-agents
+
+  # ---------------------------------------------------------------------------
+  # S3 — Agent Artifacts
+  # ---------------------------------------------------------------------------
+
+  AccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub sdlc-agent-access-logs-${AWS::AccountId}-${Stage}
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-access-logs
+            Status: Enabled
+            ExpirationInDays: 90
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Project
+          Value: sdlc-agents
+
+  AccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3ServerAccessLogDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${AccessLogsBucket.Arn}/*
+            Condition:
+              ArnLike:
+                "aws:SourceArn": !Sub arn:aws:s3:::sdlc-agent-artifacts-${AWS::AccountId}-${Stage}
+              StringEquals:
+                "aws:SourceAccount": !Sub ${AWS::AccountId}
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub sdlc-agent-artifacts-${AWS::AccountId}-${Stage}
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-screenshots
+            Prefix: screenshots/
+            Status: Enabled
+            ExpirationInDays: 90
+          - Id: expire-test-results
+            Prefix: test-results/
+            Status: Enabled
+            ExpirationInDays: 180
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AccessLogsBucket
+        LogFilePrefix: artifacts/
+      Tags:
+        - Key: Project
+          Value: sdlc-agents
+
+  # ---------------------------------------------------------------------------
+  # Shared DLQ for async Lambda failures
+  # ---------------------------------------------------------------------------
+
+  LambdaDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub sdlc-agents-lambda-dlq-${Stage}
+      MessageRetentionPeriod: 1209600  # 14 days
+      SqsManagedSseEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # Dispatch Router Lambda
+  # ---------------------------------------------------------------------------
+
+  DispatchRouterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub dispatch-router-${Stage}
+      CodeUri: ../dispatch/
+      Handler: router.handler
+      Timeout: 900
+      ReservedConcurrentExecutions: 20
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDeadLetterQueue.Arn
+      Environment:
+        Variables:
+          ASSIGNMENTS_TABLE: !Ref AssignmentsTable
+          REGISTRY_PARAM: !Sub /sdlc-agents/${Stage}/registry
+          BEDROCK_GUARDRAIL_ID: !Ref PromptInjectionGuardrail
+          BEDROCK_GUARDRAIL_VERSION: DRAFT
+          GITHUB_PAT_PARAM: /sdlc-agents/github-mcp-token
+          ASANA_PAT_PARAM: /sdlc-agents/asana-pat
+          CLOUDWATCH_NAMESPACE: SDLCAgents/Dispatch
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssignmentsTable
+        - SSMParameterReadPolicy:
+            ParameterName: !Sub sdlc-agents/${Stage}/registry
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:InvokeAgentRuntime
+              Resource:
+                - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*
+                - !Sub arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:runtime/*/runtime-endpoint/*
+            - Effect: Allow
+              Action:
+                - bedrock:ApplyGuardrail
+              Resource:
+                - !GetAtt PromptInjectionGuardrail.GuardrailArn
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/sdlc-agents/github-mcp-token
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/sdlc-agents/asana-pat
+            - Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: "*"
+              Condition:
+                StringEquals:
+                  cloudwatch:namespace: SDLCAgents/Dispatch
+
+  # ---------------------------------------------------------------------------
+  # Asana Webhook Receiver Lambda + API Gateway
+  # ---------------------------------------------------------------------------
+
+  AsanaWebhookFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub asana-webhook-${Stage}
+      CodeUri: ../dispatch/
+      Handler: asana_webhook.handler
+      Timeout: 30
+      ReservedConcurrentExecutions: 10
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt LambdaDeadLetterQueue.Arn
+      Environment:
+        Variables:
+          ASANA_PAT_PARAM: /sdlc-agents/asana-pat
+          ASANA_WEBHOOK_SECRET_PARAM: /sdlc-agents/asana-webhook-secret
+          DISPATCH_FUNCTION: !Ref DispatchRouterFunction
+          WORKITEMS_BOT_GID: !Ref WorkitemsBotGID
+          AGENT_FIELD_GID: !Ref AgentFieldGID
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref DispatchRouterFunction
+        - Statement:
+            # Steady-state permissions: read the Asana PAT and the webhook
+            # secret to verify inbound HMAC signatures. ssm:PutParameter is
+            # intentionally NOT granted here — the Asana handshake captures
+            # the webhook secret, and a Lambda that can overwrite it in
+            # steady state is a path an attacker can abuse to replace the
+            # secret with attacker-controlled bytes (threat T-9).
+            #
+            # The operator runs scripts/bootstrap_asana_webhook.py, which
+            # attaches a temporary inline ssm:PutParameter policy for the
+            # registration window, registers the webhook with Asana, waits
+            # for the handshake to land, and then detaches the policy.
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/sdlc-agents/asana-pat
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/sdlc-agents/asana-webhook-secret
+      Events:
+        Webhook:
+          Type: Api
+          Properties:
+            Path: /asana/webhook
+            Method: POST
+            RestApiId: !Ref WebhookApi
+
+  WebhookApiAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/sdlc-agents-webhook-${Stage}
+      RetentionInDays: 30
+
+  WebhookApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Description: Asana webhook endpoint for agent dispatch
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          DataTraceEnabled: false
+          MetricsEnabled: true
+      AccessLogSetting:
+        DestinationArn: !GetAtt WebhookApiAccessLogs.Arn
+        Format: >-
+          {"requestId":"$context.requestId","ip":"$context.identity.sourceIp",
+          "requestTime":"$context.requestTime","httpMethod":"$context.httpMethod",
+          "routeKey":"$context.routeKey","status":"$context.status",
+          "protocol":"$context.protocol","responseLength":"$context.responseLength"}
+
+  # ---------------------------------------------------------------------------
+  # SSM — Agent Registry Parameter
+  # ---------------------------------------------------------------------------
+
+  RegistryParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /sdlc-agents/${Stage}/registry
+      Type: String
+      Description: Agent fleet registry (synced from .dispatch/agents.yaml)
+      Value: "{}"  # Populated by CI/CD pipeline
+
+  # ---------------------------------------------------------------------------
+  # Bedrock Guardrail — Prompt Injection Defense (T-1, T-2, T-3)
+  # ---------------------------------------------------------------------------
+  # A single guardrail is shared by the Dispatch Router edge check and every
+  # agent's model invocation. Only the prompt-attack filter is enabled —
+  # content / PII / word filters are intentionally out of scope for this
+  # feature. InputStrength is MEDIUM (HIGH produced too many false positives
+  # against the Dispatch Context wrapper — see commit 4f91498); OutputStrength
+  # is NONE because agent outputs go through structural controls (Cedar
+  # roadmap + no destructive tools) rather than content filtering.
+
+  PromptInjectionGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: !Sub sdlc-agents-prompt-injection-${Stage}
+      Description: Prompt-attack defense for SDLC agent fleet (T-1, T-2, T-3)
+      BlockedInputMessaging: "This request was blocked by a prompt-injection safety filter."
+      BlockedOutputsMessaging: "The agent's response was blocked by a prompt-injection safety filter."
+      ContentPolicyConfig:
+        FiltersConfig:
+          - Type: PROMPT_ATTACK
+            InputStrength: MEDIUM
+            OutputStrength: NONE
+
+  # ---------------------------------------------------------------------------
+  # CloudWatch — Observability
+  # ---------------------------------------------------------------------------
+
+  DispatchErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub dispatch-router-errors-${Stage}
+      AlarmDescription: Dispatch Router error rate > 5%
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DispatchRouterFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  WebhookErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub asana-webhook-errors-${Stage}
+      AlarmDescription: Asana webhook receiver error rate
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref AsanaWebhookFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DispatchDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub dispatch-router-duration-${Stage}
+      AlarmDescription: Dispatch Router taking too long
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DispatchRouterFunction
+      ExtendedStatistic: p99
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 30000  # 30 seconds
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GuardrailTrippedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub dispatch-guardrail-tripped-${Stage}
+      AlarmDescription: High rate of prompt-injection trips — potential attack or false-positive spike
+      Namespace: SDLCAgents/Dispatch
+      MetricName: GuardrailTripped
+      Dimensions:
+        - Name: Stage
+          Value: !Ref Stage
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GuardrailErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub dispatch-guardrail-error-${Stage}
+      AlarmDescription: Bedrock ApplyGuardrail API errors — fail-closed bypass risk
+      Namespace: SDLCAgents/Dispatch
+      MetricName: GuardrailError
+      Dimensions:
+        - Name: Stage
+          Value: !Ref Stage
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  GuardrailReplyFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub dispatch-guardrail-reply-failed-${Stage}
+      AlarmDescription: Blocked-message reply failed to post to source thread
+      Namespace: SDLCAgents/Dispatch
+      MetricName: GuardrailReplyFailed
+      Dimensions:
+        - Name: Stage
+          Value: !Ref Stage
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  AssignmentsTableName:
+    Value: !Ref AssignmentsTable
+    Export:
+      Name: !Sub ${AWS::StackName}-AssignmentsTable
+
+  ArtifactsBucketName:
+    Value: !Ref ArtifactsBucket
+    Export:
+      Name: !Sub ${AWS::StackName}-ArtifactsBucket
+
+  DispatchRouterArn:
+    Value: !GetAtt DispatchRouterFunction.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-DispatchRouterArn
+
+  WebhookEndpoint:
+    Value: !Sub https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/asana/webhook
+    Description: Asana webhook URL — register this in Asana webhook subscriptions
+
+  WebhookApiId:
+    Value: !Ref WebhookApi
+    Export:
+      Name: !Sub ${AWS::StackName}-WebhookApiId
+
+  GuardrailId:
+    Value: !Ref PromptInjectionGuardrail
+    Description: Bedrock Guardrail ID — referenced by Router env and agent runtimes
+    Export:
+      Name: !Sub ${AWS::StackName}-GuardrailId
+
+  GuardrailArn:
+    Value: !GetAtt PromptInjectionGuardrail.GuardrailArn
+    Description: Bedrock Guardrail ARN — used for IAM policies in agent runtime roles
+    Export:
+      Name: !Sub ${AWS::StackName}-GuardrailArn
+
+  GuardrailVersion:
+    Value: DRAFT
+    Description: Guardrail version referenced by Router and agents. Bump explicitly to pin a published version.
+    Export:
+      Name: !Sub ${AWS::StackName}-GuardrailVersion

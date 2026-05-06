@@ -1,0 +1,150 @@
+name: ASH Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@22103cc46bda19c2b464ffe86db46df6922fd323 # v47.0.5
+        with:
+          files: |
+            **/*.py
+            **/*.js
+            **/*.ts
+            **/*.yaml
+            **/*.yml
+            **/*.json
+            **/*.sh
+            **/*.dockerfile
+            **/Dockerfile*
+            **/requirements*.txt
+            **/package*.json
+            **/Pipfile*
+            **/*.tf
+            **/*.tfvars
+
+      - name: Set up Python
+        if: steps.changed-files.outputs.any_changed == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install ASH
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: pip install git+https://github.com/awslabs/automated-security-helper.git@v3.2.2
+
+      - name: Create temp directory for changed files
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+        run: |
+          mkdir -p /tmp/ash-scan
+          echo "Changed files for security scan:"
+          echo "${ALL_CHANGED_FILES}" | tr ' ' '\n'
+
+      - name: Copy changed files to temp directory
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          ALL_CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+        run: |
+          for file in ${ALL_CHANGED_FILES}; do
+            if [ -f "$file" ]; then
+              mkdir -p "/tmp/ash-scan/$(dirname "$file")"
+              cp "$file" "/tmp/ash-scan/$file"
+            fi
+          done
+
+      - name: Run ASH scan on changed files
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          cd /tmp/ash-scan
+          cat > .ash_config.yaml << 'EOF'
+          reporters:
+            markdown:
+              enabled: true
+              options:
+                include_detailed_findings: true
+                max_detailed_findings: 1000
+          EOF
+          ash --mode container --config .ash_config.yaml 2>&1 | tee /tmp/ash-output.log
+        continue-on-error: true
+
+      - name: Process scan results
+        if: steps.changed-files.outputs.any_changed == 'true'
+        id: process-results
+        run: |
+          SUMMARY_FILE="/tmp/pr_comment.md"
+          echo "## Security Scan Results" > "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+
+          if [ -f "/tmp/ash-output.log" ]; then
+            TABLE_START=$(grep -n "ASH Scan Results Summary" /tmp/ash-output.log | head -1 | cut -d: -f1 || echo "0")
+            TABLE_END=$(grep -n "source-dir:" /tmp/ash-output.log | head -1 | cut -d: -f1 || echo "0")
+
+            if [ "$TABLE_START" != "0" ] && [ "$TABLE_END" != "0" ] && [ "$TABLE_END" -gt "$TABLE_START" ]; then
+              echo "| Scanner | S | C | H | M | L | I | Time | Action | Result | Thresh |" >> "$SUMMARY_FILE"
+              echo "|---------|---|---|---|---|---|---|------|--------|--------|--------|" >> "$SUMMARY_FILE"
+              sed -n "${TABLE_START},${TABLE_END}p" /tmp/ash-output.log | \
+              sed 's/\x1b\[[0-9;]*m//g' | grep "^│" | \
+              sed 's/│/|/g' | sed 's/^ *|/|/' | sed 's/| *$/|/' >> "$SUMMARY_FILE"
+              echo "" >> "$SUMMARY_FILE"
+            fi
+
+            if grep -q "Actionable findings detected!" /tmp/ash-output.log; then
+              echo "has_findings=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_findings=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "No scan results found." >> "$SUMMARY_FILE"
+            echo "has_findings=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare artifacts
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p /tmp/ash-artifacts
+          echo "${PR_NUMBER}" > /tmp/ash-artifacts/pr_number.txt
+          echo "${PR_SHA}" > /tmp/ash-artifacts/pr_sha.txt
+          cp /tmp/pr_comment.md /tmp/ash-artifacts/pr_comment.md
+          cp -r /tmp/ash-scan/.ash/ /tmp/ash-artifacts/.ash/ 2>/dev/null || true
+
+      - name: Upload ASH results
+        if: steps.changed-files.outputs.any_changed == 'true' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ash-security-results
+          path: /tmp/ash-artifacts/
+          retention-days: 30
+
+      - name: Security scan summary
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          HAS_FINDINGS: ${{ steps.process-results.outputs.has_findings }}
+        run: |
+          if [ "${HAS_FINDINGS}" = "true" ]; then
+            echo "Security findings detected. Please review the results."
+          else
+            echo "No security issues found in the changed files."
+          fi
+
+      - name: Skip message
+        if: steps.changed-files.outputs.any_changed == 'false'
+        run: echo "No relevant files changed - skipping security scan"

@@ -1,0 +1,72 @@
+# Agent Fleet Registry
+# Loaded by Dispatch Router to resolve @mentions and enforce limits.
+# Synced to SSM Parameter Store on deploy.
+
+# authorization.users is the allowlist of principals permitted to invoke each
+# agent. Identities must be stable, non-editable values:
+#   - GitHub: the user's login (e.g. "alice")
+#   - Asana:  the user's numeric GID (e.g. "1202334567890123") — NOT the
+#             display name, which is self-editable and non-unique
+#   - Slack:  the user ID (e.g. "U0123ABCDEF")
+# Fails closed: an empty list causes the Dispatch Router to return 403 for
+# every sender. Populate with the identities of operators and peer-agent bot
+# accounts before first use. Cross-agent invocation is supported — list the
+# calling agent's bot identity here to allow handoffs (e.g. Workitems bot in
+# docwriter.users).
+
+agents:
+  workitems:
+    description: "Project management — status reports, risk detection, work decomposition, sync"
+    runtime_arn: "${WORKITEMS_RUNTIME_ARN}"
+    aliases: [pm, status, plan]
+    triggers:
+      asana: [comment_mention, assignment, custom_field]
+      github: [issue_comment]
+      slack: [mention, slash_command]
+    authorization:
+      users: []
+    limits:
+      max_concurrent: 5
+      timeout_minutes: 15
+      daily_token_budget: 500000
+
+  researcher:
+    description: "Business analysis — research synthesis, competitive intel, backlog analysis"
+    runtime_arn: "${RESEARCHER_RUNTIME_ARN}"
+    aliases: [ba, research, analyze]
+    triggers:
+      asana: [comment_mention, assignment, custom_field]
+    authorization:
+      users: []
+    limits:
+      max_concurrent: 3
+      timeout_minutes: 20
+      daily_token_budget: 400000
+
+  docwriter:
+    description: "Documentation — API docs, user guides, release notes"
+    runtime_arn: "${DOCWRITER_RUNTIME_ARN}"
+    aliases: [docs, doc, writer]
+    triggers:
+      github: [issue_comment, pr_comment]
+      asana: [comment_mention, assignment, custom_field]
+      slack: [mention, slash_command]
+    authorization:
+      users: []
+    limits:
+      max_concurrent: 3
+      timeout_minutes: 15
+      daily_token_budget: 300000
+
+  adr:
+    description: "ADR linker — tags issues and reviews PRs against the repo's ADR library"
+    runtime_arn: "${ADR_RUNTIME_ARN}"
+    aliases: [decisions, architecture]
+    triggers:
+      github: [issue_comment, pr_comment]
+    authorization:
+      users: []
+    limits:
+      max_concurrent: 3
+      timeout_minutes: 10
+      daily_token_budget: 300000

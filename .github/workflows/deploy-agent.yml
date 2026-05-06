@@ -1,0 +1,221 @@
+# Shared agent CI/CD pipeline.
+# Builds container, scans, deploys to AgentCore Runtime, runs smoke test.
+#
+# On first run for an agent, creates the runtime. On subsequent runs, updates it.
+# This lets us stand up new agents by adding a deploy-<name>.yml wrapper with no
+# pre-provisioning step.
+#
+# Usage: called by per-agent workflows with the agent name as input.
+
+name: Deploy Agent
+
+on:
+  workflow_call:
+    inputs:
+      agent_name:
+        required: true
+        type: string
+        description: "Agent directory name under agents/ (e.g. workitems)"
+      env_vars:
+        required: false
+        type: string
+        default: ""
+        description: |
+          Comma-separated key=value pairs to set as environment variables on the
+          AgentCore Runtime (e.g. "GITHUB_REPO=acme/web,ASANA_PROJECT_GID=123").
+          Each per-agent wrapper workflow supplies the set of vars its agent
+          reads — see agents/<name>/project_config.py for the required keys.
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}
+  ECR_REPO: sdlc-agents/${{ inputs.agent_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate env_vars (each key must have a value)
+        if: inputs.env_vars != ''
+        env:
+          ENV_VARS: ${{ inputs.env_vars }}
+        run: |
+          # Fail loudly if any KEY=<empty> pair slipped through — usually means a
+          # GitHub Actions repository variable wasn't set. AgentCore will happily
+          # accept KEY= and the container will then KeyError on first request.
+          MISSING=()
+          IFS=',' read -ra PAIRS <<< "$ENV_VARS"
+          for PAIR in "${PAIRS[@]}"; do
+            KEY="${PAIR%%=*}"
+            VAL="${PAIR#*=}"
+            if [ -z "$VAL" ]; then
+              MISSING+=("$KEY")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::error::Missing values for required environment variables: ${MISSING[*]}"
+            echo "Set each as a GitHub Actions repository variable (Settings → Secrets and variables → Actions → Variables):"
+            for KEY in "${MISSING[@]}"; do echo "  - $KEY"; done
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.3
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Ensure ECR repository exists
+        run: |
+          aws ecr describe-repositories --repository-names "${ECR_REPO}" --region "${AWS_REGION}" >/dev/null 2>&1 \
+            || aws ecr create-repository \
+                 --repository-name "${ECR_REPO}" \
+                 --region "${AWS_REGION}" \
+                 --image-scanning-configuration scanOnPush=true \
+                 --image-tag-mutability IMMUTABLE
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@19d944daaa35f0fa1d3f7f8af1d3f2e5de25c5b7 # v2
+
+      - name: Build and push container
+        working-directory: agents
+        run: |
+          IMAGE_TAG="${{ github.sha }}"
+          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}"
+          docker build -f ${{ inputs.agent_name }}/Dockerfile -t "${IMAGE_URI}:${IMAGE_TAG}" .
+          docker push "${IMAGE_URI}:${IMAGE_TAG}"
+
+      - name: Scan with Amazon Inspector
+        run: |
+          aws inspector-scan scan-sbom \
+            --sbom "$(docker sbom ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:${{ github.sha }} --format syft-json)" \
+            --output-format INSPECTOR
+
+      - name: Resolve guardrail env vars from foundation stack
+        id: guardrail
+        run: |
+          # Read the prompt-injection guardrail ID/version from the foundation
+          # stack's outputs so every agent's Bedrock model calls get the same
+          # guardrail attached (threat-model T-1, T-2, T-3). Missing outputs
+          # are treated as a deploy-time error — agents must not run without a
+          # guardrail once the foundation stack has been updated to publish one.
+          STACK_NAME="sdlc-agents-${STAGE:-dev}"
+          GUARDRAIL_ID=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='GuardrailId'].OutputValue | [0]" \
+            --output text 2>/dev/null || echo "None")
+          GUARDRAIL_VERSION=$(aws cloudformation describe-stacks \
+            --stack-name "${STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --query "Stacks[0].Outputs[?OutputKey=='GuardrailVersion'].OutputValue | [0]" \
+            --output text 2>/dev/null || echo "None")
+          if [ "${GUARDRAIL_ID}" = "None" ] || [ -z "${GUARDRAIL_ID}" ]; then
+            echo "::error::GuardrailId output not found on stack ${STACK_NAME}. Deploy the foundation stack first — agents must not run without the prompt-injection guardrail (threat-model T-1)."
+            exit 1
+          fi
+          if [ "${GUARDRAIL_VERSION}" = "None" ] || [ -z "${GUARDRAIL_VERSION}" ]; then
+            echo "::error::GuardrailVersion output not found on stack ${STACK_NAME}. Re-deploy the foundation stack."
+            exit 1
+          fi
+          echo "guardrail_env=BEDROCK_GUARDRAIL_ID=${GUARDRAIL_ID},BEDROCK_GUARDRAIL_VERSION=${GUARDRAIL_VERSION}" >> "$GITHUB_OUTPUT"
+        env:
+          STAGE: dev
+
+      - name: Deploy to AgentCore Runtime (create or update)
+        id: deploy
+        env:
+          ENV_VARS: ${{ inputs.env_vars }}
+          GUARDRAIL_ENV: ${{ steps.guardrail.outputs.guardrail_env }}
+        run: |
+          AGENT_NAME="${{ inputs.agent_name }}"
+          IMAGE_URI="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPO }}:${{ github.sha }}"
+          ROLE_ARN="arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${AGENT_NAME}-agentcore-runtime"
+          ARTIFACT="containerConfiguration={containerUri=${IMAGE_URI}}"
+          NETWORK="networkMode=PUBLIC"
+
+          # Merge caller env_vars with the guardrail env from the foundation stack.
+          COMBINED="${ENV_VARS}"
+          if [ -n "${GUARDRAIL_ENV}" ]; then
+            if [ -n "${COMBINED}" ]; then
+              COMBINED="${COMBINED},${GUARDRAIL_ENV}"
+            else
+              COMBINED="${GUARDRAIL_ENV}"
+            fi
+          fi
+
+          ENV_ARGS=()
+          if [ -n "${COMBINED}" ]; then
+            ENV_ARGS=(--environment-variables "${COMBINED}")
+          fi
+
+          EXISTING_ID=$(aws bedrock-agentcore-control list-agent-runtimes \
+            --region "${AWS_REGION}" \
+            --query "agentRuntimes[?agentRuntimeName=='${AGENT_NAME}'].agentRuntimeId | [0]" \
+            --output text)
+
+          if [ "${EXISTING_ID}" = "None" ] || [ -z "${EXISTING_ID}" ]; then
+            echo "No existing runtime named ${AGENT_NAME} — creating."
+            RUNTIME_ID=$(aws bedrock-agentcore-control create-agent-runtime \
+              --agent-runtime-name "${AGENT_NAME}" \
+              --agent-runtime-artifact "${ARTIFACT}" \
+              --role-arn "${ROLE_ARN}" \
+              --network-configuration "${NETWORK}" \
+              "${ENV_ARGS[@]}" \
+              --region "${AWS_REGION}" \
+              --query 'agentRuntimeId' --output text)
+          else
+            echo "Updating existing runtime ${EXISTING_ID}."
+            RUNTIME_ID="${EXISTING_ID}"
+            aws bedrock-agentcore-control update-agent-runtime \
+              --agent-runtime-id "${RUNTIME_ID}" \
+              --agent-runtime-artifact "${ARTIFACT}" \
+              --role-arn "${ROLE_ARN}" \
+              --network-configuration "${NETWORK}" \
+              "${ENV_ARGS[@]}" \
+              --region "${AWS_REGION}"
+          fi
+
+          echo "runtime_id=${RUNTIME_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for runtime READY
+        run: |
+          RUNTIME_ID="${{ steps.deploy.outputs.runtime_id }}"
+          for i in $(seq 1 60); do
+            STATUS=$(aws bedrock-agentcore-control get-agent-runtime \
+              --agent-runtime-id "${RUNTIME_ID}" \
+              --region "${AWS_REGION}" \
+              --query 'status' --output text)
+            echo "status=${STATUS}"
+            case "${STATUS}" in
+              READY) exit 0 ;;
+              CREATE_FAILED|UPDATE_FAILED|DELETE_FAILED) echo "Runtime failed: ${STATUS}"; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "Timed out waiting for runtime ${RUNTIME_ID}"; exit 1
+
+      - name: Sync dispatch registry to SSM
+        run: |
+          pip install --quiet boto3 PyYAML
+          python scripts/sync_registry.py --stage dev --region ${{ env.AWS_REGION }}
+
+      - name: Smoke test
+        run: |
+          RUNTIME_ID="${{ steps.deploy.outputs.runtime_id }}"
+          RUNTIME_ARN="arn:aws:bedrock-agentcore:${AWS_REGION}:${{ secrets.AWS_ACCOUNT_ID }}:runtime/${RUNTIME_ID}"
+          aws bedrock-agentcore invoke-agent-runtime \
+            --agent-runtime-arn "${RUNTIME_ARN}" \
+            --payload '{"prompt": "health check"}' \
+            --region "${AWS_REGION}" \
+            /tmp/smoke-response.json
+          echo "--- smoke response ---"
+          cat /tmp/smoke-response.json

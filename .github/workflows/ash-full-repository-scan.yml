@@ -1,0 +1,119 @@
+name: ASH Full Repository Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 2 1 * *'  # Monthly at 2 AM UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  full-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install ASH
+        run: pip install git+https://github.com/awslabs/automated-security-helper.git@v3.2.2
+
+      - name: Run ASH full repository scan
+        run: |
+          cat > .ash_config.yaml << 'EOF'
+          reporters:
+            markdown:
+              enabled: true
+              options:
+                include_detailed_findings: true
+                max_detailed_findings: 1000
+          EOF
+          ash --mode container --config .ash_config.yaml 2>&1 | tee ash-output.log
+        continue-on-error: true
+
+      - name: Generate scan summary
+        id: scan-summary
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          SUMMARY_FILE="ash-summary.md"
+          echo "# ASH Security Scan - Full Repository Report" > "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+          echo "**Scan Date:** $(date -u +%Y-%m-%dT%H:%M:%S+00:00)" >> "$SUMMARY_FILE"
+          echo "**Trigger:** ${EVENT_NAME}" >> "$SUMMARY_FILE"
+
+          if [ -f "ash-output.log" ]; then
+            TABLE_START=$(grep -n "ASH Scan Results Summary" ash-output.log | head -1 | cut -d: -f1 || echo "0")
+            TABLE_END=$(grep -n "source-dir:" ash-output.log | head -1 | cut -d: -f1 || echo "0")
+
+            if [ "$TABLE_START" != "0" ] && [ "$TABLE_END" != "0" ] && [ "$TABLE_END" -gt "$TABLE_START" ]; then
+              echo "" >> "$SUMMARY_FILE"
+              echo "## Scanner Results" >> "$SUMMARY_FILE"
+              echo "" >> "$SUMMARY_FILE"
+              echo "| Scanner | S | C | H | M | L | I | Time | Action | Result | Thresh |" >> "$SUMMARY_FILE"
+              echo "|---------|---|---|---|---|---|---|------|--------|--------|--------|" >> "$SUMMARY_FILE"
+              sed -n "${TABLE_START},${TABLE_END}p" ash-output.log | \
+              sed 's/\x1b\[[0-9;]*m//g' | grep "^│" | \
+              sed 's/│/|/g' | sed 's/^ *|/|/' | sed 's/| *$/|/' >> "$SUMMARY_FILE"
+            fi
+
+            if grep -q "Actionable findings detected!" ash-output.log; then
+              echo "has_findings=true" >> "$GITHUB_OUTPUT"
+              echo "" >> "$SUMMARY_FILE"
+              echo "**Status:** ⚠️ Security findings detected" >> "$SUMMARY_FILE"
+            else
+              echo "has_findings=false" >> "$GITHUB_OUTPUT"
+              echo "" >> "$SUMMARY_FILE"
+              echo "**Status:** ✅ No security issues found" >> "$SUMMARY_FILE"
+            fi
+          fi
+
+      - name: Upload ASH results as artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ash-full-scan-${{ github.run_id }}
+          path: |
+            .ash/
+            ash-output.log
+            ash-summary.md
+          retention-days: 90
+
+      - name: Create issue for findings (monthly scan only)
+        if: github.event_name == 'schedule' && steps.scan-summary.outputs.has_findings == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            if (fs.existsSync('ash-summary.md')) {
+              const summaryContent = fs.readFileSync('ash-summary.md', 'utf8');
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🔒 ASH Security Scan - Monthly Report (${new Date().toISOString().split('T')[0]})`,
+                body: summaryContent + '\n\n---\n*Automatically created by the monthly security scan workflow.*',
+                labels: ['security', 'automated-scan']
+              });
+            }
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## ASH Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f "ash-summary.md" ]; then
+            cat ash-summary.md >> $GITHUB_STEP_SUMMARY
+          fi
