@@ -9,7 +9,7 @@ with the [Strands Agents SDK](https://github.com/strands-agents/sdk-python).
 
 ![SDLC roles, tools, and tasks across the software lifecycle](docs/assets/sdlc-roles-tools-tasks.png)
 
-Software delivery is a team sport played across a dozen tools by a dozen
+Software delivery is a team sport played across many tools by people in diverse
 roles. The fleet plants an agent in each role's seat so the paperwork
 (decomposition, status, docs, ADR tagging) runs itself and the humans stay
 focused on the product.
