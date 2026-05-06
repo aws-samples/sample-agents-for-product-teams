@@ -84,11 +84,22 @@ the install. It has a conversation with you to figure out which tools you use
 **which AWS account and region to deploy into**, and then walks each provisioning
 step end-to-end.
 
-From this repo, in Claude Code:
+This repo is the **installer**, not the target of the install. Run Claude Code
+from a clone of this repo and pass the target project — the repo whose CI/CD
+you're wiring the fleet into — as an argument:
 
 ```
-/sdlc-agents
+# a local clone you already have
+/sdlc-agents ~/code/my-product
+
+# or a git remote URL (the skill will ask where to clone it)
+/sdlc-agents git@github.com:my-org/my-product.git
 ```
+
+If you omit the argument, the skill will ask. It won't silently assume the cwd
+is the target, because ADR detection, `.github/workflows/` inspection, and
+`.sdlc-agents/selection.yaml` all need to run against the target repo, not the
+installer.
 
 `/sdlc-agents` is a project slash command shipped in this repo under
 [`.claude/commands/sdlc-agents.md`](.claude/commands/sdlc-agents.md) — Claude

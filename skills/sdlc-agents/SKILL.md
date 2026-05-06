@@ -13,6 +13,12 @@ The SDLC Agent Fleet is a set of autonomous agents that cover the software devel
 2. Matches those tools to the subset of agents that make sense
 3. Provisions and configures only those agents
 
+## Installer repo vs. target project
+
+This flow runs from inside a clone of the **installer repo** (the one containing `agents/`, `infra/`, `cedar/`, and these skills). It installs the fleet onto a **target project** — usually a different repository whose CI/CD you are wiring up.
+
+Never assume the cwd is the target. The `/sdlc-agents` slash command resolves a `TARGET_REPO` absolute path (and `TARGET_REMOTE` origin URL) from the user's argument before handing off to this flow — if those aren't set yet, stop and resolve them before Step 1. All target-side filesystem operations (ADR detection, `.sdlc-agents/selection.yaml`, `.github/workflows/` edits, `git` commands for branch/remote checks) use `TARGET_REPO`. All installer-side reads (agent source, templates, skill files, scripts) come from the cwd.
+
 ## Golden rules
 
 - **Never assume tool choice.** Ask. Most customers have strong opinions about their PM tool, their source-control host, their chat platform. Don't pick GitHub just because it's the common default.
@@ -37,7 +43,9 @@ Record answers. If the user names a tool that doesn't have a shipping connect sk
 
 With the tool list in hand, invoke the **sdlc-agents-select** skill. It has the authoritative agent roster + which integrations each agent needs, and it presents the filtered list to the user. The user confirms or edits.
 
-After selection: write the chosen list to `.sdlc-agents/selection.yaml` in the target repo. Later steps read from there so the user can re-run any single step without restating their selection.
+All repo-specific checks inside the select skill (ADR directory detection in particular) must be rooted at `TARGET_REPO`, not the installer cwd.
+
+After selection: write the chosen list to `$TARGET_REPO/.sdlc-agents/selection.yaml`. Later steps read from there so the user can re-run any single step without restating their selection.
 
 ### Step 3 — Provision AWS infrastructure
 
