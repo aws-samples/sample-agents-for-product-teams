@@ -4,7 +4,11 @@ name: Deploy Workitems Agent
 # variables → Actions → Variables). These are baked into the AgentCore
 # Runtime as environment variables — see agents/workitems/project_config.py
 # for what each one means.
-#   GITHUB_REPO             <owner>/<repo> the agent should act on
+#   TARGET_REPO             <owner>/<repo> the agent should act on
+#                             (baked into the runtime as env var GITHUB_REPO —
+#                             the repo variable itself can't be named
+#                             GITHUB_REPO because GitHub reserves the GITHUB_
+#                             prefix for user-defined variables)
 #   ASANA_PROJECT_GID       Asana project the agent reads from
 #   ASANA_WORKSPACE_GID     Asana workspace containing that project
 #
@@ -28,5 +32,5 @@ jobs:
     uses: ./.github/workflows/deploy-agent.yml
     with:
       agent_name: workitems
-      env_vars: "GITHUB_REPO=${{ vars.GITHUB_REPO }},ASANA_PROJECT_GID=${{ vars.ASANA_PROJECT_GID }},ASANA_WORKSPACE_GID=${{ vars.ASANA_WORKSPACE_GID }}"
+      env_vars: "GITHUB_REPO=${{ vars.TARGET_REPO }},ASANA_PROJECT_GID=${{ vars.ASANA_PROJECT_GID }},ASANA_WORKSPACE_GID=${{ vars.ASANA_WORKSPACE_GID }}"
     secrets: inherit

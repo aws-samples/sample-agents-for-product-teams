@@ -98,7 +98,7 @@ Per `deploy-agent.yml`'s `env_vars` input, the following are baked into each Age
 | Variable | Required by | Notes |
 |---|---|---|
 | `AWS_REGION` | All deploy workflows | Falls back to `us-west-2` if unset |
-| `GITHUB_REPO` | `deploy-workitems.yml`, `deploy-docwriter.yml`, `deploy-adr.yml` | Format `<owner>/<repo>` |
+| `TARGET_REPO` | `deploy-workitems.yml`, `deploy-docwriter.yml`, `deploy-adr.yml` | Format `<owner>/<repo>`. GitHub rejects user-defined variables starting with `GITHUB_`, so the repo variable is `TARGET_REPO` and the deploy workflow passes it through to the container as env var `GITHUB_REPO`. |
 | `ASANA_PROJECT_GID` | `deploy-workitems.yml`, `deploy-docwriter.yml`, `deploy-researcher.yml` | |
 | `ASANA_WORKSPACE_GID` | same three | |
 | `ASANA_PROJECT_NAME` | optional | Cosmetic label in system prompts |

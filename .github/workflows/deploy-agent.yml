@@ -25,6 +25,9 @@ on:
           AgentCore Runtime (e.g. "GITHUB_REPO=acme/web,ASANA_PROJECT_GID=123").
           Each per-agent wrapper workflow supplies the set of vars its agent
           reads — see agents/<name>/project_config.py for the required keys.
+          Note the runtime env var key is GITHUB_REPO, but the GitHub Actions
+          repository variable feeding it is TARGET_REPO (GitHub reserves the
+          GITHUB_ prefix for user-defined variables).
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION || 'us-west-2' }}

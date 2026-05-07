@@ -171,12 +171,12 @@ Go to the repo **Settings → Secrets and variables → Actions** and add:
 
 | Secret | Value | Required |
 |--------|-------|----------|
-| `AWS_DEPLOY_ROLE_ARN` | ARN from SAM output `DeployRoleArn` | Always |
+| `AWS_DEPLOY_ROLE_ARN` | ARN of the deploy role you created in Step 1.3 of `docs/aws-deploy.md` | Always |
 | `AWS_ACCOUNT_ID` | 12-digit account ID | Always |
 
 The deploy workflows use OIDC — no long-lived AWS credentials are stored in GitHub.
 
-**Verify OIDC is configured.** The SAM template creates the OIDC provider and trust policy automatically, scoped to this repo. If you're deploying to an account where the OIDC provider already exists, the CloudFormation create will fail — check the SAM template and handle accordingly (the provider is idempotent with `AWS::IAM::OIDCProvider` using `DeletionPolicy: Retain`).
+**The SAM foundation stack does not create the OIDC provider or deploy role** — you (or the `sdlc-agents-provision-aws` skill's Step 0) create both by hand the first time the fleet is set up in an AWS account. See `docs/aws-deploy.md` §1.3 for the trust policy and rationale.
 
 ---
 

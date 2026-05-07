@@ -27,7 +27,7 @@ Use an Anthropic API key instead only if the user has a constraint that forces i
 - A GitHub repo the user admins.
 - AWS account with **Bedrock model access enabled** for `us.anthropic.claude-opus-4-7-v1` in the region Claude Code will run in (default `us-east-1`). The region is independent of where the SDLC agent fleet runs — Claude Code only needs `bedrock:InvokeModel` from CI runners.
 - `gh` CLI authenticated as a repo admin (for setting secrets/variables); or the user can click through the UI.
-- If using the SDLC Agent Fleet: the foundation stack already creates a `GitHubActionsDeployRole`. You can either reuse it (simplest) or create a dedicated `ClaudeCodeBedrockRole` (cleaner blast radius). This skill does the dedicated-role path — reuse is a footnote at the end.
+- If using the SDLC Agent Fleet: `sdlc-agents-provision-aws` Step 0 already created a deploy role (default name `sdlc-agents-deploy`). You can either reuse it (simplest) or create a dedicated `ClaudeCodeBedrockRole` (cleaner blast radius). This skill does the dedicated-role path — reuse is a footnote at the end.
 
 ## Collect values up front
 
@@ -66,7 +66,7 @@ aws iam list-open-id-connect-providers \
        --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
 ```
 
-(Idempotent — skip if already present. The foundation stack in this fleet creates one; reuse it.)
+(Idempotent — skip if already present. `sdlc-agents-provision-aws` Step 0a creates one for the fleet; reuse it.)
 
 ### 2b. Create the role with a scoped trust policy
 
@@ -280,7 +280,7 @@ Ask the user to post `@claude hello, can you see this?` as a comment on any issu
 
 ## Reusing the existing deploy role (footnote)
 
-If the user already has `GitHubActionsDeployRole` from the SDLC Agent Fleet foundation stack, they can attach the Bedrock inline policy from Step 2c to *that* role and set `CLAUDE_CODE_ROLE_ARN` to the existing `AWS_DEPLOY_ROLE_ARN`. One fewer role to manage, at the cost of a broader blast radius: if `@claude` gets compromised (via prompt injection that extracts secrets), an attacker has deploy privileges. For production, keep the roles separate.
+If the user already has `sdlc-agents-deploy` from `sdlc-agents-provision-aws` Step 0, they can attach the Bedrock inline policy from Step 2c to *that* role and set `CLAUDE_CODE_ROLE_ARN` to the existing `AWS_DEPLOY_ROLE_ARN`. One fewer role to manage, at the cost of a broader blast radius: if `@claude` gets compromised (via prompt injection that extracts secrets), an attacker has deploy privileges. For production, keep the roles separate.
 
 ## What this skill does NOT do
 

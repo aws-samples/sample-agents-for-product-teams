@@ -94,10 +94,12 @@ MCP should return 200 or a JSON-RPC response on POST. A 401 means the token isn'
 
 ## Configure CI OIDC
 
-Separate from the MCP credential: the deploy workflows assume an AWS role via OIDC. The trust policy is set up by the foundation stack when `sdlc-agents-provision-aws` runs. The user's GitHub repo needs:
+Separate from the MCP credential: the deploy workflows assume an AWS role via OIDC. The OIDC provider and deploy role are **not** created by the foundation stack — `sdlc-agents-provision-aws` Step 0 creates them manually (one-time per AWS account). By the time you're in this skill, that role exists and its ARN was captured as `$DEPLOY_ROLE_ARN`. The target GitHub repo needs:
 
-- Secret `AWS_DEPLOY_ROLE_ARN` — ARN of the role created in the foundation stack (`DeployRoleArn` output)
+- Secret `AWS_DEPLOY_ROLE_ARN` — the role ARN from `sdlc-agents-provision-aws` Step 0b
 - Secret `AWS_ACCOUNT_ID` — the 12-digit account ID
+
+Both are already written by `sdlc-agents-provision-aws` Step 5 if you ran it first. If the user skipped that step or set them manually, confirm they exist here.
 
 Walk the user through:
 - Repo → Settings → Secrets and variables → Actions → New repository secret

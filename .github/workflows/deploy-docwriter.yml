@@ -4,7 +4,10 @@ name: Deploy Docwriter Agent
 # variables → Actions → Variables). These are baked into the AgentCore
 # Runtime as environment variables — see agents/docwriter/project_config.py
 # for what each one means.
-#   GITHUB_REPO             <owner>/<repo> the agent should act on
+#   TARGET_REPO             <owner>/<repo> the agent should act on
+#                             (baked into the runtime as env var GITHUB_REPO —
+#                             see deploy-workitems.yml for why the variable
+#                             name itself can't start with GITHUB_)
 #   ASANA_PROJECT_GID       Asana project the agent reads from
 #   ASANA_WORKSPACE_GID     Asana workspace containing that project
 #
@@ -26,5 +29,5 @@ jobs:
     uses: ./.github/workflows/deploy-agent.yml
     with:
       agent_name: docwriter
-      env_vars: "GITHUB_REPO=${{ vars.GITHUB_REPO }},ASANA_PROJECT_GID=${{ vars.ASANA_PROJECT_GID }},ASANA_WORKSPACE_GID=${{ vars.ASANA_WORKSPACE_GID }}"
+      env_vars: "GITHUB_REPO=${{ vars.TARGET_REPO }},ASANA_PROJECT_GID=${{ vars.ASANA_PROJECT_GID }},ASANA_WORKSPACE_GID=${{ vars.ASANA_WORKSPACE_GID }}"
     secrets: inherit

@@ -12,6 +12,81 @@ description: Use when the user is ready to provision AWS infrastructure for thei
 - Bedrock model access is enabled for `us.anthropic.claude-opus-4-7-v1` in the target region (check: `aws bedrock get-foundation-model --model-identifier us.anthropic.claude-opus-4-7-v1 --region $REGION`). If not, stop and tell the user to request access in the Bedrock console before continuing.
 - The shared foundation stack (`infra/foundation/template.yaml` → `sdlc-agents-${STAGE}`) is deployed. Check by listing the stack; deploy with SAM if missing.
 
+## Step 0 — OIDC provider and deploy role (one-time per AWS account)
+
+The foundation stack does **not** create the GitHub Actions OIDC provider or the deploy role — `docs/aws-deploy.md` §1.3 is the source of truth on this. You create them by hand here the first time the fleet is set up in a given AWS account. Skip this step if the account already has both (common when a different repo in the org previously onboarded).
+
+### 0a. OIDC provider
+
+```bash
+aws iam list-open-id-connect-providers \
+  | grep -q 'token.actions.githubusercontent.com' \
+  || aws iam create-open-id-connect-provider \
+       --url https://token.actions.githubusercontent.com \
+       --client-id-list sts.amazonaws.com \
+       --thumbprint-list 6938fd4d98bab03faadb97b34396831e3780aea1
+```
+
+### 0b. Deploy role
+
+Trust policy uses `StringEquals` on two explicit `sub` values — see `docs/aws-deploy.md` §1.3 for the reasoning (do **not** use `StringLike: "repo:<org>/<repo>:*"`, it lets any branch assume the role).
+
+```bash
+GH_OWNER=$(yq '.github.owner // ""' "$TARGET_REPO/.sdlc-agents/selection.yaml")
+GH_REPO=$(yq '.github.repo // ""' "$TARGET_REPO/.sdlc-agents/selection.yaml")
+ACCOUNT_ID=$(yq '.aws.account_id' "$TARGET_REPO/.sdlc-agents/selection.yaml")
+# If github.owner/repo aren't in selection.yaml yet (connect-github hasn't
+# run), derive them from git -C "$TARGET_REPO" remote get-url origin and
+# confirm with the user before writing the trust policy.
+
+cat > /tmp/deploy-trust.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": {
+      "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
+    },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": {
+        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+        "token.actions.githubusercontent.com:sub": [
+          "repo:${GH_OWNER}/${GH_REPO}:ref:refs/heads/main",
+          "repo:${GH_OWNER}/${GH_REPO}:pull_request"
+        ]
+      }
+    }
+  }]
+}
+EOF
+
+aws iam create-role \
+  --role-name sdlc-agents-deploy \
+  --assume-role-policy-document file:///tmp/deploy-trust.json \
+  --description "Assumed by GitHub Actions via OIDC to deploy SDLC agent fleet" \
+  || echo "(role exists — if it was created for a different repo, update trust policy)"
+
+rm /tmp/deploy-trust.json
+```
+
+Attach the permissions the deploy workflow actually needs. `AdministratorAccess` is the fastest demo path; for production scope down to ECR push, `bedrock-agentcore-control:*` on the specific runtimes, `iam:PassRole` on `<agent>-agentcore-runtime`, and `cloudformation:DescribeStacks` on the foundation stack. See `docs/aws-deploy.md` for the full policy surface.
+
+```bash
+aws iam attach-role-policy \
+  --role-name sdlc-agents-deploy \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+Capture the role ARN — it goes into GitHub Secrets as `AWS_DEPLOY_ROLE_ARN` in Step 5.
+
+```bash
+DEPLOY_ROLE_ARN=$(aws iam get-role --role-name sdlc-agents-deploy --query 'Role.Arn' --output text)
+echo "$DEPLOY_ROLE_ARN"
+```
+
+If the role already existed but was scoped to a different repo, update its trust policy with `aws iam update-assume-role-policy` — or create a fresh role per repo for cleaner blast radius. Never fall back to `StringLike` wildcards.
+
 ## For each selected agent, do the following — in order, idempotently
 
 ### 1. IAM runtime role
@@ -80,20 +155,24 @@ If it doesn't exist, skip runtime creation here — the deploy workflow (`.githu
 
 Read `.dispatch/agents.yaml` in the target project. For each provisioned agent, set `runtime_arn` to the value returned by the `list-agent-runtimes` check above if the runtime already exists, or leave it as the `"${<AGENT>_RUNTIME_ARN}"` placeholder if it doesn't — the registry sync will resolve it after the first deploy creates the runtime.
 
-### 5. Publish the per-repo config as GitHub Actions Variables
+### 5. Publish the per-repo config as GitHub Actions Variables and Secrets
 
 The deploy workflows (`deploy-<agent>.yml`) read several **repository variables** and bake them into the AgentCore Runtime as environment variables. Skipping this step will produce a runtime that starts but `KeyError`s on the first invocation.
 
-The variables that must be set — pull the values from `.sdlc-agents/selection.yaml`, `.sdlc-agents/asana.yaml`, and `.sdlc-agents/github.yaml` (written by the connect skills):
+All `gh` commands in this step target the **target repo** — run them inside `$TARGET_REPO` or pass `--repo "$GH_OWNER/$GH_REPO"`. Do not set these on the installer repo.
+
+#### Variables
 
 | Variable | Source | Consumed by | Required? |
 |---|---|---|---|
 | `AWS_REGION` | `selection.yaml → aws.region` | All deploy workflows, `agent-dispatch.yml` | Yes |
-| `GITHUB_REPO` | `github.yaml → owner` + `repo` (joined as `<owner>/<repo>`) | `workitems`, `docwriter`, `adr` | Yes, if any of those agents are selected |
+| `TARGET_REPO` | `github.yaml → owner` + `repo` (joined as `<owner>/<repo>`) — baked into the runtime as env var `GITHUB_REPO` | `workitems`, `docwriter`, `adr` | Yes, if any of those agents are selected |
 | `ASANA_WORKSPACE_GID` | `asana.yaml → workspace_gid` | `workitems`, `docwriter`, `researcher` | Yes, if any of those agents are selected |
 | `ASANA_PROJECT_GID` | `asana.yaml → project_gid` | same | Yes, if any of those agents are selected |
 | `ASANA_PROJECT_NAME` | `asana.yaml → project_name` | same (cosmetic, shown in prompts) | No |
 | `CLAUDE_CODE_AWS_REGION` | operator preference (defaults to `us-east-1`) | `claude-code.yml` | No |
+
+Why `TARGET_REPO` (not `GITHUB_REPO`) is the variable name: GitHub reserves the `GITHUB_` prefix and silently rejects user-defined variables that start with it. Setting a variable named `GITHUB_REPO` with `gh variable set` fails with `422 Variable names cannot start with GITHUB_`. The deploy workflows read `vars.TARGET_REPO` and pass it through to the container as `GITHUB_REPO=...` — the agent Python still reads `os.environ["GITHUB_REPO"]` at runtime.
 
 The deploy workflows reject empty values for the vars listed in `env_vars` — if a required variable isn't set, the workflow fails with a clear `::error::` line telling you which one. Don't add optional vars to `env_vars` unless they're set.
 
@@ -101,78 +180,36 @@ Set each with `gh variable set` (uses the operator's GitHub auth, no PAT require
 
 ```bash
 # Read selection.yaml into shell vars (requires yq)
-REGION=$(yq '.aws.region' .sdlc-agents/selection.yaml)
-ACCOUNT_ID=$(yq '.aws.account_id' .sdlc-agents/selection.yaml)
-GH_OWNER=$(yq '.github.owner' .sdlc-agents/selection.yaml)
-GH_REPO=$(yq '.github.repo' .sdlc-agents/selection.yaml)
-AS_WORKSPACE=$(yq '.asana.workspace_gid' .sdlc-agents/selection.yaml)
-AS_PROJECT=$(yq '.asana.project_gid' .sdlc-agents/selection.yaml)
-AS_NAME=$(yq '.asana.project_name // ""' .sdlc-agents/selection.yaml)
+SELECTION="$TARGET_REPO/.sdlc-agents/selection.yaml"
+REGION=$(yq '.aws.region' "$SELECTION")
+ACCOUNT_ID=$(yq '.aws.account_id' "$SELECTION")
+GH_OWNER=$(yq '.github.owner' "$SELECTION")
+GH_REPO=$(yq '.github.repo' "$SELECTION")
+AS_WORKSPACE=$(yq '.asana.workspace_gid' "$SELECTION")
+AS_PROJECT=$(yq '.asana.project_gid' "$SELECTION")
+AS_NAME=$(yq '.asana.project_name // ""' "$SELECTION")
 
 # Write them to the target repo's Actions Variables
+cd "$TARGET_REPO"
 gh variable set AWS_REGION          --body "$REGION"
-gh variable set GITHUB_REPO         --body "${GH_OWNER}/${GH_REPO}"
+gh variable set TARGET_REPO         --body "${GH_OWNER}/${GH_REPO}"
 gh variable set ASANA_WORKSPACE_GID --body "$AS_WORKSPACE"
 gh variable set ASANA_PROJECT_GID   --body "$AS_PROJECT"
 [ -n "$AS_NAME" ] && gh variable set ASANA_PROJECT_NAME --body "$AS_NAME"
 ```
 
-Verify:
-
-```bash
-gh variable list
-```
-
-Confirm all required rows are present. If `gh` isn't installed or the operator can't use it, fall back to the UI path: **Repo → Settings → Secrets and variables → Actions → Variables tab → New repository variable**.
+Verify: `gh variable list`. Confirm all required rows are present. If `gh` isn't installed, fall back to the UI: **Repo → Settings → Secrets and variables → Actions → Variables tab**.
 
 Skip any variable whose source is empty (e.g. if the user isn't deploying Asana-using agents, skip the `ASANA_*` trio).
 
-### 5. Publish the per-repo config as GitHub Actions Variables
-
-The deploy workflows (`deploy-<agent>.yml`) read several **repository variables** and bake them into the AgentCore Runtime as environment variables. Skipping this step will produce a runtime that starts but `KeyError`s on the first invocation.
-
-The variables that must be set — pull the values from `.sdlc-agents/selection.yaml`, `.sdlc-agents/asana.yaml`, and `.sdlc-agents/github.yaml` (written by the connect skills):
-
-| Variable | Source | Consumed by | Required? |
-|---|---|---|---|
-| `AWS_REGION` | `selection.yaml → aws.region` | All deploy workflows, `agent-dispatch.yml` | Yes |
-| `GITHUB_REPO` | `github.yaml → owner` + `repo` (joined as `<owner>/<repo>`) | `workitems`, `docwriter`, `adr` | Yes, if any of those agents are selected |
-| `ASANA_WORKSPACE_GID` | `asana.yaml → workspace_gid` | `workitems`, `docwriter`, `researcher` | Yes, if any of those agents are selected |
-| `ASANA_PROJECT_GID` | `asana.yaml → project_gid` | same | Yes, if any of those agents are selected |
-| `ASANA_PROJECT_NAME` | `asana.yaml → project_name` | same (cosmetic, shown in prompts) | No |
-| `CLAUDE_CODE_AWS_REGION` | operator preference (defaults to `us-east-1`) | `claude-code.yml` | No |
-
-The deploy workflows reject empty values for the vars listed in `env_vars` — if a required variable isn't set, the workflow fails with a clear `::error::` line telling you which one. Don't add optional vars to `env_vars` unless they're set.
-
-Set each with `gh variable set` (uses the operator's GitHub auth, no PAT required):
+#### Secrets
 
 ```bash
-# Read selection.yaml into shell vars (requires yq)
-REGION=$(yq '.aws.region' .sdlc-agents/selection.yaml)
-ACCOUNT_ID=$(yq '.aws.account_id' .sdlc-agents/selection.yaml)
-GH_OWNER=$(yq '.github.owner' .sdlc-agents/selection.yaml)
-GH_REPO=$(yq '.github.repo' .sdlc-agents/selection.yaml)
-AS_WORKSPACE=$(yq '.asana.workspace_gid' .sdlc-agents/selection.yaml)
-AS_PROJECT=$(yq '.asana.project_gid' .sdlc-agents/selection.yaml)
-AS_NAME=$(yq '.asana.project_name // ""' .sdlc-agents/selection.yaml)
-
-# Write them to the target repo's Actions Variables
-gh variable set AWS_REGION          --body "$REGION"
-gh variable set GITHUB_REPO         --body "${GH_OWNER}/${GH_REPO}"
-gh variable set ASANA_WORKSPACE_GID --body "$AS_WORKSPACE"
-gh variable set ASANA_PROJECT_GID   --body "$AS_PROJECT"
-[ -n "$AS_NAME" ] && gh variable set ASANA_PROJECT_NAME --body "$AS_NAME"
+gh secret set AWS_DEPLOY_ROLE_ARN --body "$DEPLOY_ROLE_ARN"   # from Step 0b
+gh secret set AWS_ACCOUNT_ID      --body "$ACCOUNT_ID"
 ```
 
-Verify:
-
-```bash
-gh variable list
-```
-
-Confirm all required rows are present. If `gh` isn't installed or the operator can't use it, fall back to the UI path: **Repo → Settings → Secrets and variables → Actions → Variables tab → New repository variable**.
-
-Skip any variable whose source is empty (e.g. if the user isn't deploying Asana-using agents, skip the `ASANA_*` trio).
+Both are required — the deploy workflow's `aws-actions/configure-aws-credentials` call fails without `AWS_DEPLOY_ROLE_ARN`, and the container build uses `AWS_ACCOUNT_ID` to compose the ECR URI.
 
 ## AWS org gotchas to flag
 
@@ -192,7 +229,8 @@ Provisioned 3 agents in <REGION>:
   researcher: arn:aws:bedrock-agentcore:<REGION>:…:runtime/researcher-XYZ
   docwriter:  arn:aws:bedrock-agentcore:<REGION>:…:runtime/docwriter-XYZ
 
-GitHub Actions Variables written: AWS_REGION, GITHUB_REPO, ASANA_WORKSPACE_GID, ASANA_PROJECT_GID, ASANA_PROJECT_NAME
+GitHub Actions Variables written: AWS_REGION, TARGET_REPO, ASANA_WORKSPACE_GID, ASANA_PROJECT_GID, ASANA_PROJECT_NAME
+GitHub Actions Secrets written:   AWS_DEPLOY_ROLE_ARN, AWS_ACCOUNT_ID
 
 Next: connect integrations. Run the matching connect skills for your tools:
   sdlc-agents-connect-asana (your PM)
