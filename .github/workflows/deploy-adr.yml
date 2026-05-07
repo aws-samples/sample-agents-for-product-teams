@@ -16,6 +16,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write    # required so the reusable callee (deploy-agent.yml) can assume the OIDC deploy role
 
 jobs:
   deploy:

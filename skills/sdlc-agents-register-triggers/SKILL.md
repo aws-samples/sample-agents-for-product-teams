@@ -9,7 +9,7 @@ description: Use when the user's agents are provisioned and integrations are con
 
 - `.sdlc-agents/selection.yaml` has the agent list, toolchain, and GIDs captured by the connect skills
 - The shared foundation stack is deployed (`dispatch-router-${STAGE}` Lambda + `asana-webhook-${STAGE}` Lambda + API Gateway exist)
-- The agents' runtime ARNs are in `.dispatch/agents.yaml` and the registry has been synced to SSM (`python scripts/sync_registry.py --stage $STAGE --region $REGION`)
+- The first successful CI deploy of each selected agent has completed — `deploy-agent.yml` creates the AgentCore Runtime and then runs `scripts/sync_registry.py` automatically, so at this point `.dispatch/agents.yaml` has the runtime ARNs and the SSM registry is current. If you're re-running this skill after changing the agent selection, re-run `python scripts/sync_registry.py --stage $STAGE --region $REGION` manually before proceeding.
 
 ## Per-integration wiring
 

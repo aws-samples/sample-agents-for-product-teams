@@ -9,7 +9,7 @@ description: Use when the user is ready to provision AWS infrastructure for thei
 
 - `.sdlc-agents/selection.yaml` exists and lists the agents, AWS account ID, region, and stage
 - The user's current AWS credentials can reach the target account (`aws sts get-caller-identity` shows the right account)
-- Bedrock model access is enabled for `us.anthropic.claude-opus-4-7-v1` in the target region (check: `aws bedrock get-foundation-model --model-identifier us.anthropic.claude-opus-4-7-v1 --region $REGION`). If not, stop and tell the user to request access in the Bedrock console before continuing.
+- Bedrock model access is enabled for the Opus 4.7 cross-region inference profile in the target region (check: `aws bedrock get-inference-profile --inference-profile-identifier us.anthropic.claude-opus-4-7 --region $REGION`). If the call 404s, stop and tell the user to request access in the Bedrock console before continuing.
 - The shared foundation stack (`infra/foundation/template.yaml` → `sdlc-agents-${STAGE}`) is deployed. Check by listing the stack; deploy with SAM if missing.
 
 ## Step 0 — OIDC provider and deploy role (one-time per AWS account)

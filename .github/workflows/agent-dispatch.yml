@@ -20,6 +20,12 @@ permissions:
 
 jobs:
   dispatch:
+    # The mention list below (and the matching loop further down) covers every
+    # agent the fleet can ship — including roadmap names (@uat, @merge, @triage)
+    # that aren't deployed yet. sdlc-agents-register-triggers has the operator
+    # edit this list to match the agents selected in .sdlc-agents/selection.yaml
+    # before enabling the workflow. If you're reading this in the installer
+    # repo, the full list is intentional.
     if: |
       contains(github.event.comment.body, '@workitems') ||
       contains(github.event.comment.body, '@researcher') ||
