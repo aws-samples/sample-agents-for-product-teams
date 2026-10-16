@@ -30,6 +30,84 @@ Globals:
 Resources:
 
   # ---------------------------------------------------------------------------
+  # KMS — Shared Customer-Managed CMK for data-at-rest encryption
+  # ---------------------------------------------------------------------------
+  # One CMK encrypts the DynamoDB table, the SQS DLQ, both Lambda functions'
+  # environment variables, and the API Gateway access-log group. The key
+  # policy grants the account root full administrative control and grants
+  # each consuming AWS service principal (dynamodb, sqs, lambda, logs) the
+  # minimum operations it needs to encrypt/decrypt with the key. Automatic
+  # annual rotation is enabled.
+
+  SharedEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub Shared CMK for SDLC agent fleet data-at-rest encryption (${Stage})
+      EnableKeyRotation: true
+      KeySpec: SYMMETRIC_DEFAULT
+      KeyUsage: ENCRYPT_DECRYPT
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: sdlc-agents-shared-cmk
+        Statement:
+          # Account root retains full control so the key is manageable via IAM.
+          - Sid: EnableRootAccountAdmin
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: "*"
+          # DynamoDB, SQS and Lambda use the key through their own service
+          # endpoints; the ViaService condition scopes usage to those services
+          # within this account/region.
+          - Sid: AllowDataServiceUse
+            Effect: Allow
+            Principal:
+              Service:
+                - dynamodb.amazonaws.com
+                - sqs.amazonaws.com
+                - lambda.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              StringEquals:
+                "kms:ViaService":
+                  - !Sub dynamodb.${AWS::Region}.amazonaws.com
+                  - !Sub sqs.${AWS::Region}.amazonaws.com
+                  - !Sub lambda.${AWS::Region}.amazonaws.com
+          # CloudWatch Logs encrypts log-group data with the key. The service
+          # principal is region-qualified and the EncryptionContext condition
+          # scopes the grant to this account's log groups only.
+          - Sid: AllowCloudWatchLogsUse
+            Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.amazonaws.com
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+            Condition:
+              ArnLike:
+                "kms:EncryptionContext:aws:logs:arn": !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*
+      Tags:
+        - Key: Project
+          Value: sdlc-agents
+
+  SharedEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/sdlc-agents-${Stage}
+      TargetKeyId: !Ref SharedEncryptionKey
+
+  # ---------------------------------------------------------------------------
   # DynamoDB — Assignment Tracking
   # ---------------------------------------------------------------------------
 
@@ -38,6 +116,10 @@ Resources:
     Properties:
       TableName: !Sub dispatch-assignments-${Stage}
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref SharedEncryptionKey
       AttributeDefinitions:
         - AttributeName: assignment_id
           AttributeType: S
@@ -84,6 +166,15 @@ Resources:
 
   AccessLogsBucket:
     Type: AWS::S3::Bucket
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: >-
+              This bucket IS the S3 server-access-log destination for the
+              ArtifactsBucket. Enabling access logging on the log bucket
+              itself would make it log to itself (recursion). Documented
+              accepted risk / false-positive.
     Properties:
       BucketName: !Sub sdlc-agent-access-logs-${AWS::AccountId}-${Stage}
       LifecycleConfiguration:
@@ -169,7 +260,8 @@ Resources:
     Properties:
       QueueName: !Sub sdlc-agents-lambda-dlq-${Stage}
       MessageRetentionPeriod: 1209600  # 14 days
-      SqsManagedSseEnabled: true
+      KmsMasterKeyId: !Ref SharedEncryptionKey
+      KmsDataKeyReusePeriodSeconds: 300
 
   # ---------------------------------------------------------------------------
   # Dispatch Router Lambda
@@ -177,12 +269,22 @@ Resources:
 
   DispatchRouterFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              Sample/demo scope. This Lambda calls AWS APIs (Bedrock,
+              SSM, DynamoDB) over public service endpoints; placing it in a
+              VPC would require NAT gateways or interface VPC endpoints that
+              are out of scope for a sample. Documented accepted risk.
     Properties:
       FunctionName: !Sub dispatch-router-${Stage}
       CodeUri: ../dispatch/
       Handler: router.handler
       Timeout: 900
       ReservedConcurrentExecutions: 20
+      KmsKeyArn: !GetAtt SharedEncryptionKey.Arn
       DeadLetterQueue:
         Type: SQS
         TargetArn: !GetAtt LambdaDeadLetterQueue.Arn
@@ -232,12 +334,22 @@ Resources:
 
   AsanaWebhookFunction:
     Type: AWS::Serverless::Function
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_117
+            comment: >-
+              Sample/demo scope. This Lambda calls AWS APIs (Bedrock,
+              SSM, DynamoDB) over public service endpoints; placing it in a
+              VPC would require NAT gateways or interface VPC endpoints that
+              are out of scope for a sample. Documented accepted risk.
     Properties:
       FunctionName: !Sub asana-webhook-${Stage}
       CodeUri: ../dispatch/
       Handler: asana_webhook.handler
       Timeout: 30
       ReservedConcurrentExecutions: 10
+      KmsKeyArn: !GetAtt SharedEncryptionKey.Arn
       DeadLetterQueue:
         Type: SQS
         TargetArn: !GetAtt LambdaDeadLetterQueue.Arn
@@ -282,9 +394,19 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/apigateway/sdlc-agents-webhook-${Stage}
       RetentionInDays: 30
+      KmsKeyId: !GetAtt SharedEncryptionKey.Arn
 
   WebhookApi:
     Type: AWS::Serverless::Api
+    Metadata:
+      checkov:
+        skip:
+          - id: CKV_AWS_120
+            comment: >-
+              Caching is intentionally disabled. The only route is a
+              non-idempotent webhook POST (/asana/webhook); response caching
+              is inappropriate for webhook delivery and would risk replaying
+              stale responses. Documented accepted risk.
     Properties:
       StageName: !Ref Stage
       Description: Asana webhook endpoint for agent dispatch
