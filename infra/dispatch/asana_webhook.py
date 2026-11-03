@@ -44,7 +44,9 @@ ASANA_PAT_PARAM = os.environ.get("ASANA_PAT_PARAM", "/sdlc-agents/asana-pat")
 # value, so it is safe to log. The `_PATH` suffix and `os.getenv` (rather than
 # `os.environ.get("...SECRET...")`) keep CodeQL's clear-text-logging heuristic
 # from treating the path as the secret itself. The env var name is unchanged.
-ASANA_WEBHOOK_SECRET_PARAM_PATH = os.getenv("ASANA_WEBHOOK_SECRET_PARAM", "/sdlc-agents/asana-webhook-secret")
+ASANA_WEBHOOK_SECRET_PARAM_PATH = os.getenv(
+    "ASANA_WEBHOOK_SECRET_PARAM", "/sdlc-agents/asana-webhook-secret"
+)
 ASANA_BASE_URL = "https://app.asana.com/api/1.0"
 
 lambda_client = boto3.client("lambda")
@@ -123,7 +125,9 @@ def get_story(story_gid: str, invocation_state: dict) -> dict:
 # --- Dispatch ----------------------------------------------------------------
 
 
-def dispatch(agent_id: str, trigger_type: str, instruction: str, context: dict, sender: str):
+def dispatch(
+    agent_id: str, trigger_type: str, instruction: str, context: dict, sender: str
+):
     """Forward a resolved event to the Dispatch Router Lambda."""
     payload = {
         "source": "asana",
@@ -172,7 +176,7 @@ def process_comment_mention(event_data: dict, invocation_state: dict):
 
     # If no explicit instruction, the instruction is "you were mentioned on this task"
     if not instruction:
-        instruction = f"You were mentioned on Asana task. Review it and determine what action to take."
+        instruction = "You were mentioned on Asana task. Review it and determine what action to take."
 
     task = get_task(parent_gid, invocation_state)
 
@@ -201,7 +205,7 @@ def process_assignment(event_data: dict, invocation_state: dict):
     dispatch(
         agent_id=agent_id,
         trigger_type="assignment",
-        instruction=f"You have been assigned to this Asana task. Read it and take appropriate action.",
+        instruction="You have been assigned to this Asana task. Read it and take appropriate action.",
         # sender matches the allowlist — must be the immutable .gid, not .name
         sender=assignee_gid,
         context=_build_task_context(task, task_gid),
@@ -300,7 +304,10 @@ def handler(event, context):
                 "with operator credentials to register the webhook.",
                 e,
             )
-            return {"statusCode": 403, "body": "handshake not permitted in steady state"}
+            return {
+                "statusCode": 403,
+                "body": "handshake not permitted in steady state",
+            }
         return {
             "statusCode": 200,
             "headers": {"X-Hook-Secret": hook_secret},
@@ -321,7 +328,10 @@ def handler(event, context):
         )
         return {"statusCode": 503, "body": "webhook not registered"}
     if not webhook_secret:
-        logger.error("Webhook secret %s is empty; refusing to process events.", ASANA_WEBHOOK_SECRET_PARAM_PATH)
+        logger.error(
+            "Webhook secret %s is empty; refusing to process events.",
+            ASANA_WEBHOOK_SECRET_PARAM_PATH,
+        )
         return {"statusCode": 503, "body": "webhook not registered"}
     signature = headers.get("x-hook-signature", "")
     expected = hmac.new(
@@ -361,6 +371,8 @@ def handler(event, context):
     if failures:
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": "one or more events failed", "failures": failures}),
+            "body": json.dumps(
+                {"error": "one or more events failed", "failures": failures}
+            ),
         }
     return {"statusCode": 200, "body": "ok"}
