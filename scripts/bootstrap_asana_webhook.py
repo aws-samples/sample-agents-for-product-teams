@@ -44,7 +44,7 @@ from botocore.exceptions import ClientError
 
 ASANA_API = "https://app.asana.com/api/1.0"
 ASANA_PAT_PARAM = "/sdlc-agents/asana-pat"
-WEBHOOK_SECRET_PARAM = "/sdlc-agents/asana-webhook-secret"  # nosec B105 — SSM parameter name, not a credential
+WEBHOOK_SECRET_PARAM_PATH = "/sdlc-agents/asana-webhook-secret"  # nosec B105 — SSM parameter name, not a credential
 INLINE_POLICY_NAME = "TempAsanaWebhookHandshake"
 HANDSHAKE_TIMEOUT_SECONDS = 60
 HANDSHAKE_POLL_INTERVAL_SECONDS = 2
@@ -57,7 +57,7 @@ def get_lambda_role_name(lambda_client, function_name: str) -> str:
 
 
 def webhook_secret_arn(region: str, account_id: str) -> str:
-    return f"arn:aws:ssm:{region}:{account_id}:parameter{WEBHOOK_SECRET_PARAM}"
+    return f"arn:aws:ssm:{region}:{account_id}:parameter{WEBHOOK_SECRET_PARAM_PATH}"
 
 
 def attach_temporary_policy(iam, role_name: str, region: str, account_id: str) -> None:
@@ -89,7 +89,7 @@ def detach_temporary_policy(iam, role_name: str) -> None:
 
 def read_stored_secret(ssm) -> str | None:
     try:
-        resp = ssm.get_parameter(Name=WEBHOOK_SECRET_PARAM, WithDecryption=True)
+        resp = ssm.get_parameter(Name=WEBHOOK_SECRET_PARAM_PATH, WithDecryption=True)
     except ssm.exceptions.ParameterNotFound:
         return None
     return resp["Parameter"]["Value"]
@@ -191,7 +191,7 @@ def main() -> int:
         if not wait_for_handshake(ssm, baseline_secret):
             print(
                 "Timed out waiting for handshake to populate "
-                f"{WEBHOOK_SECRET_PARAM}. Check Lambda CloudWatch logs for "
+                f"{WEBHOOK_SECRET_PARAM_PATH}. Check Lambda CloudWatch logs for "
                 "the handshake attempt and delete the webhook before retrying.",
                 file=sys.stderr,
             )
@@ -199,13 +199,13 @@ def main() -> int:
         stored = read_stored_secret(ssm)
         if not stored:
             print(
-                f"Handshake write to {WEBHOOK_SECRET_PARAM} returned an empty "
+                f"Handshake write to {WEBHOOK_SECRET_PARAM_PATH} returned an empty "
                 "value. Refusing to finish — the webhook Lambda fails closed on "
                 "empty secrets. Delete the Asana webhook and retry.",
                 file=sys.stderr,
             )
             return 4
-        print(f"Handshake captured; {WEBHOOK_SECRET_PARAM} updated")
+        print(f"Handshake captured; {WEBHOOK_SECRET_PARAM_PATH} updated")
     except ClientError as e:
         print(f"Bootstrap failed: {e}", file=sys.stderr)
         return 3
