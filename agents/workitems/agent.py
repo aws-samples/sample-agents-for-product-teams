@@ -13,22 +13,23 @@ import logging
 import os
 import sys
 
-from strands import Agent
-from strands.tools.mcp import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
+from bedrock_agentcore.memory.integrations.strands.memorystore import (
+    AgentCoreMemoryStore,
+)
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands_tools.agent_core_memory import AgentCoreMemoryToolProvider
-
+from project_config import build_project_context
+from prompts import SYSTEM_PROMPT
 from shared.assignment import complete_assignment, fail_assignment
 from shared.bedrock import build_model
-from prompts import SYSTEM_PROMPT
-from project_config import build_project_context
-from tools.status_report import generate_status_report
-from tools.risk_detection import detect_risks
-from tools.sync import reconcile_sync
+from strands import Agent
+from strands.memory import MemoryManager
+from strands.tools.mcp import MCPClient
+from tools.asana_mcp import ASANA_MCP_URL, get_access_token
+from tools.github_mcp import GITHUB_MCP_URL, get_github_token
 from tools.post_results import post_results
-from tools.asana_mcp import get_access_token, ASANA_MCP_URL
-from tools.github_mcp import get_github_token, GITHUB_MCP_URL
+from tools.risk_detection import detect_risks
+from tools.status_report import generate_status_report
+from tools.sync import reconcile_sync
 
 # --- Logging -----------------------------------------------------------------
 # Configure root logger to emit to stdout so AgentCore's OTel sidecar captures
@@ -57,6 +58,7 @@ def invoke(payload, context=None):
 
     if isinstance(payload, str):
         import json
+
         try:
             payload = json.loads(payload)
         except (json.JSONDecodeError, TypeError):
@@ -106,31 +108,32 @@ def invoke(payload, context=None):
     tools = [generate_status_report, detect_risks, reconcile_sync, post_results]
 
     # Memory — optional until Memory resource is created
+    memory_manager = None
     if MEMORY_ID:
-        memory_provider = AgentCoreMemoryToolProvider(
-            memory_id=MEMORY_ID,
-            actor_id=ACTOR_ID,
-            session_id=session_id,
-            namespace=f"/agents/workitems/{session_id}",
+        memory_manager = MemoryManager(
+            stores=[
+                AgentCoreMemoryStore(
+                    memory_id=MEMORY_ID,
+                    actor_id=ACTOR_ID,
+                    session_id=session_id,
+                    namespace=f"/agents/workitems/{session_id}",
+                    writable=True,
+                    extraction=True,
+                )
+            ],
+            injection=False,
         )
-        tools.extend(memory_provider.tools)
 
     # Asana MCP — official server with OAuth (required)
     asana_token = get_access_token()
     asana_client = MCPClient(
-        lambda: streamablehttp_client(
-            ASANA_MCP_URL,
-            headers={"Authorization": f"Bearer {asana_token}"},
-        )
+        url=ASANA_MCP_URL, headers={"Authorization": f"Bearer {asana_token}"}
     )
 
     # GitHub MCP — official remote server with OAuth (required)
     github_token = get_github_token()
     github_client = MCPClient(
-        lambda: streamablehttp_client(
-            GITHUB_MCP_URL,
-            headers={"Authorization": f"Bearer {github_token}"},
-        )
+        url=GITHUB_MCP_URL, headers={"Authorization": f"Bearer {github_token}"}
     )
 
     with asana_client, github_client:
@@ -144,12 +147,16 @@ def invoke(payload, context=None):
 
         all_tools = [*asana_tools, *github_tools, *tools]
 
-        system_prompt = SYSTEM_PROMPT.format(project_context=build_project_context()) + dispatch_context_block
+        system_prompt = (
+            SYSTEM_PROMPT.format(project_context=build_project_context())
+            + dispatch_context_block
+        )
 
         agent = Agent(
             model=model,
             system_prompt=system_prompt,
             tools=all_tools,
+            memory_manager=memory_manager,
         )
         try:
             result = agent(user_input)

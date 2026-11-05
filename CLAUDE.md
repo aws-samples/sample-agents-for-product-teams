@@ -27,9 +27,9 @@ docs/             — Planning docs, specs, roadmap
 - **Agent Framework**: Strands Agents SDK
 - **Model**: Claude Opus 4.7 via Amazon Bedrock
 - **Runtime**: Amazon Bedrock AgentCore Runtime (containerized)
-- **Tool Access**: Direct MCP (`mcp.asana.com/v2/mcp`, `api.githubcopilot.com/mcp/`) via Strands' `streamablehttp_client`. AgentCore Gateway is a planned upgrade.
+- **Tool Access**: Direct MCP (`mcp.asana.com/v2/mcp`, `api.githubcopilot.com/mcp/`) via Strands' `MCPClient(url=...)`. AgentCore Gateway is a planned upgrade.
 - **Auth**: Credentials in SSM Parameter Store (SecureString) — per-agent runtime role has narrow `ssm:GetParameter` access. AgentCore Identity is a planned upgrade.
-- **Memory**: Agents honor `AGENTCORE_MEMORY_ID` via Strands' `AgentCoreMemoryToolProvider`. No Memory resource is provisioned by the fleet's infra template today; this is a roadmap item.
+- **Memory**: Agents honor `AGENTCORE_MEMORY_ID` via Strands' `MemoryManager` with `AgentCoreMemoryStore`. No Memory resource is provisioned by the fleet's infra template today; this is a roadmap item.
 - **Policy**: Cedar policy files under `cedar/<agent>.cedar` (currently advisory; runtime enforcement is a roadmap item).
 - **Infra**: AWS SAM (CloudFormation) — see `docs/aws-deploy.md` for the full surface.
 - **CI/CD**: GitHub Actions → ECR → AgentCore Runtime
