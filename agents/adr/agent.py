@@ -11,21 +11,22 @@ import logging
 import os
 import sys
 
-from strands import Agent
-from strands.tools.mcp import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
+from bedrock_agentcore.memory.integrations.strands.memorystore import (
+    AgentCoreMemoryStore,
+)
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands_tools.agent_core_memory import AgentCoreMemoryToolProvider
-
+from project_config import build_project_context
+from prompts import SYSTEM_PROMPT
 from shared.assignment import complete_assignment, fail_assignment
 from shared.bedrock import build_model
-from prompts import SYSTEM_PROMPT
-from project_config import build_project_context
+from strands import Agent
+from strands.memory import MemoryManager
+from strands.tools.mcp import MCPClient
+from tools.find_linked_issues import find_linked_issues
+from tools.format_rationale import format_pr_review_summary, format_tag_issue_comment
+from tools.github_mcp import GITHUB_MCP_URL, get_github_token
 from tools.index_adrs import index_adrs
 from tools.match_adrs import match_issue_to_adrs, match_pr_to_adrs
-from tools.find_linked_issues import find_linked_issues
-from tools.format_rationale import format_tag_issue_comment, format_pr_review_summary
-from tools.github_mcp import get_github_token, GITHUB_MCP_URL
 
 # --- Logging -----------------------------------------------------------------
 logging.basicConfig(
@@ -46,6 +47,7 @@ def invoke(payload, context=None):
     """Main entry. Dispatches based on trigger source (issue vs PR)."""
     if isinstance(payload, str):
         import json
+
         try:
             payload = json.loads(payload)
         except (json.JSONDecodeError, TypeError):
@@ -71,7 +73,8 @@ def invoke(payload, context=None):
         is_pr = bool(source_context.get("pr_number"))
         pr_body = source_context.get("pr_body", "")
         issue_or_pr_number = (
-            source_context.get("pr_number") if is_pr
+            source_context.get("pr_number")
+            if is_pr
             else source_context.get("issue_number", "unknown")
         )
         dispatch_context_block = (
@@ -86,7 +89,10 @@ def invoke(payload, context=None):
             f"on {source_context.get('repo', 'unknown')}\n"
         )
 
-    system_prompt = SYSTEM_PROMPT.format(project_context=build_project_context()) + dispatch_context_block
+    system_prompt = (
+        SYSTEM_PROMPT.format(project_context=build_project_context())
+        + dispatch_context_block
+    )
 
     model = build_model()
     tools = [
@@ -98,21 +104,25 @@ def invoke(payload, context=None):
         format_pr_review_summary,
     ]
 
+    memory_manager = None
     if MEMORY_ID:
-        memory_provider = AgentCoreMemoryToolProvider(
-            memory_id=MEMORY_ID,
-            actor_id=ACTOR_ID,
-            session_id=session_id,
-            namespace=f"/agents/adr/{session_id}",
+        memory_manager = MemoryManager(
+            stores=[
+                AgentCoreMemoryStore(
+                    memory_id=MEMORY_ID,
+                    actor_id=ACTOR_ID,
+                    session_id=session_id,
+                    namespace=f"/agents/adr/{session_id}",
+                    writable=True,
+                    extraction=True,
+                )
+            ],
+            injection=False,
         )
-        tools.extend(memory_provider.tools)
 
     github_token = get_github_token()
     github_client = MCPClient(
-        lambda: streamablehttp_client(
-            GITHUB_MCP_URL,
-            headers={"Authorization": f"Bearer {github_token}"},
-        )
+        url=GITHUB_MCP_URL, headers={"Authorization": f"Bearer {github_token}"}
     )
 
     with github_client:
@@ -123,6 +133,7 @@ def invoke(payload, context=None):
             model=model,
             system_prompt=system_prompt,
             tools=all_tools,
+            memory_manager=memory_manager,
         )
         try:
             result = agent(user_input)

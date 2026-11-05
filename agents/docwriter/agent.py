@@ -11,22 +11,23 @@ GitHub-only — the Workitems agent owns Asana side of the loop.
 import logging
 import os
 
-from strands import Agent
-from strands.tools.mcp import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
+from bedrock_agentcore.memory.integrations.strands.memorystore import (
+    AgentCoreMemoryStore,
+)
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands_tools.agent_core_memory import AgentCoreMemoryToolProvider
-
+from project_config import build_project_context
+from prompts import SYSTEM_PROMPT
 from shared.assignment import complete_assignment, fail_assignment
 from shared.bedrock import build_model
-from prompts import SYSTEM_PROMPT
-from project_config import build_project_context
+from strands import Agent
+from strands.memory import MemoryManager
+from strands.tools.mcp import MCPClient
+from tools.check_doc_freshness import check_doc_freshness
+from tools.detect_doc_gaps import detect_doc_gaps
 from tools.generate_api_docs import generate_api_docs
 from tools.generate_release_notes import generate_release_notes
-from tools.detect_doc_gaps import detect_doc_gaps
-from tools.check_doc_freshness import check_doc_freshness
+from tools.github_mcp import GITHUB_MCP_URL, get_github_token
 from tools.post_results import post_results
-from tools.github_mcp import get_github_token, GITHUB_MCP_URL
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ def invoke(payload, context=None):
 
     if isinstance(payload, str):
         import json
+
         try:
             payload = json.loads(payload)
         except (json.JSONDecodeError, TypeError):
@@ -59,7 +61,9 @@ def invoke(payload, context=None):
     session_id = payload.get("session_id", ctx.get("session_id", "default"))
     assignment_id = payload.get("assignment_id", "")
     source = payload.get("source", "unknown")
-    source_context = payload.get("source_context", {}) or payload.get("context", {}) or {}
+    source_context = (
+        payload.get("source_context", {}) or payload.get("context", {}) or {}
+    )
 
     # Dispatch context lives in the system prompt, not in the user message —
     # the "[Dispatch Context] ... [User Request]" wrapper trips Bedrock
@@ -69,7 +73,9 @@ def invoke(payload, context=None):
     dispatch_context_block = ""
     if source_context and source == "github":
         is_pr = source_context.get("is_pr") == "true" or source_context.get("pr_number")
-        issue_or_pr = source_context.get("issue_number") or source_context.get("pr_number", "unknown")
+        issue_or_pr = source_context.get("issue_number") or source_context.get(
+            "pr_number", "unknown"
+        )
         target_type = "PR" if is_pr else "issue"
         dispatch_context_block = (
             "\n\n## Current Dispatch\n\n"
@@ -96,33 +102,46 @@ def invoke(payload, context=None):
         )
 
     # Build system prompt with project context + dispatch context.
-    system_prompt = SYSTEM_PROMPT.format(
-        project_context=build_project_context(),
-    ) + dispatch_context_block
+    system_prompt = (
+        SYSTEM_PROMPT.format(
+            project_context=build_project_context(),
+        )
+        + dispatch_context_block
+    )
 
     # max_tokens bumped from Claude's default (4K) to 16K so Docwriter can
     # emit multi-file patches without hitting MaxTokensReachedException
     # mid-tool-call on a multi-file README update.
     model = build_model(max_tokens=16000)
-    tools = [generate_api_docs, generate_release_notes, detect_doc_gaps, check_doc_freshness, post_results]
+    tools = [
+        generate_api_docs,
+        generate_release_notes,
+        detect_doc_gaps,
+        check_doc_freshness,
+        post_results,
+    ]
 
     # Memory — optional until Memory resource is created
+    memory_manager = None
     if MEMORY_ID:
-        memory_provider = AgentCoreMemoryToolProvider(
-            memory_id=MEMORY_ID,
-            actor_id=ACTOR_ID,
-            session_id=session_id,
-            namespace=f"/agents/docwriter/{session_id}",
+        memory_manager = MemoryManager(
+            stores=[
+                AgentCoreMemoryStore(
+                    memory_id=MEMORY_ID,
+                    actor_id=ACTOR_ID,
+                    session_id=session_id,
+                    namespace=f"/agents/docwriter/{session_id}",
+                    writable=True,
+                    extraction=True,
+                )
+            ],
+            injection=False,
         )
-        tools.extend(memory_provider.tools)
 
     # GitHub MCP — official remote server (primary for Docwriter)
     github_token = get_github_token()
     github_client = MCPClient(
-        lambda: streamablehttp_client(
-            GITHUB_MCP_URL,
-            headers={"Authorization": f"Bearer {github_token}"},
-        )
+        url=GITHUB_MCP_URL, headers={"Authorization": f"Bearer {github_token}"}
     )
 
     with github_client:
@@ -133,6 +152,7 @@ def invoke(payload, context=None):
             model=model,
             system_prompt=system_prompt,
             tools=all_tools,
+            memory_manager=memory_manager,
         )
         try:
             result = agent(user_input)
