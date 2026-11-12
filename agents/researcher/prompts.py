@@ -24,7 +24,8 @@ output goes back to Asana as comments, new tasks, or task updates.
 
 2. **COMPETE** — Monitor and analyze the competitive landscape using the
    `web_search` tool (Tavily). Track competitor product launches, pricing
-   changes, and positioning. Maintain findings in memory across runs.
+   changes, and positioning. Maintain findings across runs: `search_memory`
+   for prior scans first, then `add_memory` for each new finding worth keeping.
    Identify opportunities and threats.
 
 3. **SPECIFY** — Draft user stories with acceptance criteria from research

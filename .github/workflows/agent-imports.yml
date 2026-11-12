@@ -1,0 +1,62 @@
+# Installs each agent's requirements.txt the way its Dockerfile does and
+# imports agent.py. Ruff never executes imports, so an import-time break from
+# a dependency release (mcp 2.x, strands-agents-tools 0.9.0) otherwise only
+# shows up after merge, when the image fails to start.
+
+name: Agent Imports
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'agents/**'
+      - '.github/workflows/agent-imports.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'agents/**'
+      - '.github/workflows/agent-imports.yml'
+  schedule:
+    # Weekly, so a new upstream release inside the allowed ranges is caught
+    # even when nobody touches agents/.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agent: [adr, docwriter, researcher, workitems]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r agents/${{ matrix.agent }}/requirements.txt pytest
+
+      - name: Import agent.py
+        # Same layout as the image: agent files at the root, shared/ beside them.
+        # Placeholder values only satisfy the module-level os.environ lookups.
+        working-directory: agents/${{ matrix.agent }}
+        env:
+          PYTHONPATH: ..
+          AWS_DEFAULT_REGION: us-west-2
+          GITHUB_REPO: example/repo
+          ASANA_PROJECT_GID: '0'
+          ASANA_WORKSPACE_GID: '0'
+        run: python -c "import agent"
+
+      - name: Shared tests
+        run: python -m pytest -q agents/shared/tests

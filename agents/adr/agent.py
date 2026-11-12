@@ -11,17 +11,13 @@ import logging
 import os
 import sys
 
-from bedrock_agentcore.memory.integrations.strands.memorystore import (
-    AgentCoreMemoryStore,
-)
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from project_config import build_project_context
 from prompts import SYSTEM_PROMPT
+from shared.agent_setup import build_mcp_client, build_memory_manager
 from shared.assignment import complete_assignment, fail_assignment
 from shared.bedrock import build_model
 from strands import Agent
-from strands.memory import MemoryManager
-from strands.tools.mcp import MCPClient
 from tools.find_linked_issues import find_linked_issues
 from tools.format_rationale import format_pr_review_summary, format_tag_issue_comment
 from tools.github_mcp import GITHUB_MCP_URL, get_github_token
@@ -104,26 +100,10 @@ def invoke(payload, context=None):
         format_pr_review_summary,
     ]
 
-    memory_manager = None
-    if MEMORY_ID:
-        memory_manager = MemoryManager(
-            stores=[
-                AgentCoreMemoryStore(
-                    memory_id=MEMORY_ID,
-                    actor_id=ACTOR_ID,
-                    session_id=session_id,
-                    namespace=f"/agents/adr/{session_id}",
-                    writable=True,
-                    extraction=True,
-                )
-            ],
-            injection=False,
-        )
+    memory_manager = build_memory_manager(MEMORY_ID, ACTOR_ID, session_id)
 
     github_token = get_github_token()
-    github_client = MCPClient(
-        url=GITHUB_MCP_URL, headers={"Authorization": f"Bearer {github_token}"}
-    )
+    github_client = build_mcp_client(GITHUB_MCP_URL, github_token)
 
     with github_client:
         github_tools = github_client.list_tools_sync()

@@ -13,17 +13,13 @@ import logging
 import os
 import sys
 
-from bedrock_agentcore.memory.integrations.strands.memorystore import (
-    AgentCoreMemoryStore,
-)
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from project_config import build_project_context
 from prompts import SYSTEM_PROMPT
+from shared.agent_setup import build_mcp_client, build_memory_manager
 from shared.assignment import complete_assignment, fail_assignment
 from shared.bedrock import build_model
 from strands import Agent
-from strands.memory import MemoryManager
-from strands.tools.mcp import MCPClient
 from tools.asana_mcp import ASANA_MCP_URL, get_access_token
 from tools.github_mcp import GITHUB_MCP_URL, get_github_token
 from tools.post_results import post_results
@@ -108,33 +104,15 @@ def invoke(payload, context=None):
     tools = [generate_status_report, detect_risks, reconcile_sync, post_results]
 
     # Memory — optional until Memory resource is created
-    memory_manager = None
-    if MEMORY_ID:
-        memory_manager = MemoryManager(
-            stores=[
-                AgentCoreMemoryStore(
-                    memory_id=MEMORY_ID,
-                    actor_id=ACTOR_ID,
-                    session_id=session_id,
-                    namespace=f"/agents/workitems/{session_id}",
-                    writable=True,
-                    extraction=True,
-                )
-            ],
-            injection=False,
-        )
+    memory_manager = build_memory_manager(MEMORY_ID, ACTOR_ID, session_id)
 
     # Asana MCP — official server with OAuth (required)
     asana_token = get_access_token()
-    asana_client = MCPClient(
-        url=ASANA_MCP_URL, headers={"Authorization": f"Bearer {asana_token}"}
-    )
+    asana_client = build_mcp_client(ASANA_MCP_URL, asana_token)
 
     # GitHub MCP — official remote server with OAuth (required)
     github_token = get_github_token()
-    github_client = MCPClient(
-        url=GITHUB_MCP_URL, headers={"Authorization": f"Bearer {github_token}"}
-    )
+    github_client = build_mcp_client(GITHUB_MCP_URL, github_token)
 
     with asana_client, github_client:
         asana_tools = asana_client.list_tools_sync()
