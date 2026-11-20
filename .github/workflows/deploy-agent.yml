@@ -37,7 +37,40 @@ permissions:
   contents: read
 
 jobs:
+  # Deploys need an AWS account. A fresh clone or fork has none of the secrets
+  # below, so skip instead of failing. Secrets can't be read in a job-level
+  # `if`, so read them through `env` here and expose a `configured` output.
+  preflight:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - name: Check deploy secrets
+        id: check
+        env:
+          AWS_DEPLOY_ROLE_ARN: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          if [ -z "${AWS_DEPLOY_ROLE_ARN}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Deploy skipped"
+              echo "Deploys are off because the \`AWS_DEPLOY_ROLE_ARN\` secret is not set."
+              echo "Set the secrets and variables listed under *Deploy workflows* in the README to turn them on."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Deploy skipped: AWS_DEPLOY_ROLE_ARN secret is not set (see the README, Deploy workflows)."
+            exit 0
+          fi
+          if [ -z "${AWS_ACCOUNT_ID}" ]; then
+            echo "::error::AWS_DEPLOY_ROLE_ARN is set but the AWS_ACCOUNT_ID secret is not. Set both (see the README, Deploy workflows)."
+            exit 1
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
   build-and-deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -192,7 +225,7 @@ jobs:
       - name: Wait for runtime READY
         run: |
           RUNTIME_ID="${{ steps.deploy.outputs.runtime_id }}"
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             STATUS=$(aws bedrock-agentcore-control get-agent-runtime \
               --agent-runtime-id "${RUNTIME_ID}" \
               --region "${AWS_REGION}" \
