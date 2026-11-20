@@ -11,6 +11,7 @@ name: Deploy Researcher Agent
 # to add optional vars without tripping the missing-value guard.
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:

@@ -8,6 +8,7 @@ name: Deploy Adr Agent
 #                   can't start with GITHUB_)
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:

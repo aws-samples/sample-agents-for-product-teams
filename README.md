@@ -228,6 +228,26 @@ Run these only for the integrations you actually use.
 | `ash-full-repository-scan.yml` | Monthly + manual | Full repo security scan |
 | `dependabot.yml` | Dependabot PRs | Auto-merge patch/minor updates |
 
+### Deploy workflows
+
+The four `deploy-<agent>.yml` workflows run on pushes to `main` that touch `agents/<name>/**` or `agents/shared/**`, and can be started by hand from the **Actions** tab (`workflow_dispatch`). They deploy to your own AWS account, so they stay off until you configure it:
+
+- **Not configured** (no `AWS_DEPLOY_ROLE_ARN` secret): the deploy is skipped. The run is green, the `build-and-deploy` job shows as skipped, and the run summary says deploys are off.
+- **Configured** (`AWS_DEPLOY_ROLE_ARN` set): the deploy runs. If `AWS_ACCOUNT_ID` or a variable the agent needs is missing, the run fails with an error naming it.
+
+Set these under **Settings → Secrets and variables → Actions**:
+
+| Type | Name | Needed by |
+|------|------|-----------|
+| Secret | `AWS_DEPLOY_ROLE_ARN` | All agents |
+| Secret | `AWS_ACCOUNT_ID` | All agents |
+| Variable | `AWS_REGION` (optional, defaults to `us-west-2`) | All agents |
+| Variable | `TARGET_REPO` (`<owner>/<repo>` the agent acts on) | `workitems`, `docwriter`, `adr` |
+| Variable | `ASANA_PROJECT_GID` | `workitems`, `docwriter`, `researcher` |
+| Variable | `ASANA_WORKSPACE_GID` | `workitems`, `docwriter`, `researcher` |
+
+See [Configure GitHub repository secrets](#2-configure-github-repository-secrets) for how to get the role ARN.
+
 ## Security
 
 This fleet is published as a **reference architecture**, not a turnkey
