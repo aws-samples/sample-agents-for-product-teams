@@ -105,7 +105,7 @@ A fleet of autonomous AI agents that operate as specialized team members across 
 
 ### 4.6 Fleet Memory — Shared Knowledge Layer (roadmap)
 
-Agents honor an `AGENTCORE_MEMORY_ID` environment variable today (the Strands `AgentCoreMemoryToolProvider` is wired up), but no Memory resource is provisioned by the shipping infra template. Teams that want memory provision their own.
+Agents honor an `AGENTCORE_MEMORY_ID` environment variable today (a Strands `MemoryManager` with `AgentCoreMemoryStore` is wired up), but no Memory resource is provisioned by the shipping infra template. Teams that want memory provision their own.
 
 Planned when the operator story firms up:
 

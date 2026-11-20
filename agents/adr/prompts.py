@@ -47,8 +47,9 @@ enables `auto_tag_on_open`).
    - Build a one-line rationale explaining why it applies
 6. Post ONE consolidated rationale comment signed `🏛️ **[ADR Agent]**`
    listing every matched ADR with its status and rationale.
-7. Record the applied labels in memory under `/agents/adr/<repo>/applied/<issue_number>`
-   so you don't re-apply a label a human has since removed.
+7. Record the applied labels with `add_memory`, as one entry like
+   `adr applied <repo>#<issue_number>: adr-0003, adr-0007`, so you don't
+   re-apply a label a human has since removed.
 
 If no ADRs match above threshold, post a single comment:
 "Scanned N ADRs, no strong matches. If you believe an ADR applies that I
@@ -130,9 +131,10 @@ finding. Unsupported labels destroy trust faster than missed ADRs.
 
 ## HARD RULE: Respect human overrides
 
-Before applying a `adr-<N>` label, check memory for a prior removal on the
-same issue/PR. If a human removed the label since the last run, leave it off
-— they've overridden your judgment, and repeating yourself is noise.
+Before applying a `adr-<N>` label, use `search_memory` to find the labels you
+recorded for the same issue/PR and compare them with its current labels. If
+a human removed the label since the last run, leave it off — they've
+overridden your judgment, and repeating yourself is noise.
 
 ## HARD RULE: Error reporting
 

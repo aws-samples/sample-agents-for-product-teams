@@ -11,24 +11,21 @@ import logging
 import os
 import sys
 
-from strands import Agent
-from strands.tools.mcp import MCPClient
-from mcp.client.streamable_http import streamablehttp_client
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from strands_tools.agent_core_memory import AgentCoreMemoryToolProvider
-
+from project_config import build_project_context
+from prompts import SYSTEM_PROMPT
+from shared.agent_setup import build_mcp_client, build_memory_manager
 from shared.assignment import complete_assignment, fail_assignment
 from shared.bedrock import build_model
-from prompts import SYSTEM_PROMPT
-from project_config import build_project_context
-from tools.synthesize_research import synthesize_research
-from tools.competitive_scan import competitive_scan
-from tools.review_spec import review_spec
+from strands import Agent
 from tools.analyze_backlog import analyze_backlog
+from tools.asana_mcp import ASANA_MCP_URL, get_access_token
+from tools.competitive_scan import competitive_scan
 from tools.draft_user_stories import draft_user_stories
 from tools.post_results import post_results
+from tools.review_spec import review_spec
+from tools.synthesize_research import synthesize_research
 from tools.web_search import web_search
-from tools.asana_mcp import get_access_token, ASANA_MCP_URL
 
 # --- Logging -----------------------------------------------------------------
 # Configure root logger to emit to stdout so AgentCore's OTel sidecar captures
@@ -57,6 +54,7 @@ def invoke(payload, context=None):
 
     if isinstance(payload, str):
         import json
+
         try:
             payload = json.loads(payload)
         except (json.JSONDecodeError, TypeError):
@@ -89,9 +87,12 @@ def invoke(payload, context=None):
         )
 
     # Build system prompt with project context + dispatch context.
-    system_prompt = SYSTEM_PROMPT.format(
-        project_context=build_project_context(),
-    ) + dispatch_context_block
+    system_prompt = (
+        SYSTEM_PROMPT.format(
+            project_context=build_project_context(),
+        )
+        + dispatch_context_block
+    )
 
     model = build_model()
     tools = [
@@ -105,23 +106,11 @@ def invoke(payload, context=None):
     ]
 
     # Memory — optional until Memory resource is created
-    if MEMORY_ID:
-        memory_provider = AgentCoreMemoryToolProvider(
-            memory_id=MEMORY_ID,
-            actor_id=ACTOR_ID,
-            session_id=session_id,
-            namespace=f"/agents/researcher/{session_id}",
-        )
-        tools.extend(memory_provider.tools)
+    memory_manager = build_memory_manager(MEMORY_ID, ACTOR_ID, session_id)
 
     # Asana MCP — official server with OAuth (Researcher's only external platform)
     asana_token = get_access_token()
-    asana_client = MCPClient(
-        lambda: streamablehttp_client(
-            ASANA_MCP_URL,
-            headers={"Authorization": f"Bearer {asana_token}"},
-        )
-    )
+    asana_client = build_mcp_client(ASANA_MCP_URL, asana_token)
 
     with asana_client:
         asana_tools = asana_client.list_tools_sync()
@@ -131,6 +120,7 @@ def invoke(payload, context=None):
             model=model,
             system_prompt=system_prompt,
             tools=all_tools,
+            memory_manager=memory_manager,
         )
         try:
             result = agent(user_input)

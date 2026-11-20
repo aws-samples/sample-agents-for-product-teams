@@ -77,8 +77,8 @@ Strands is AWS-native and integrates cleanly with AgentCore Runtime. `BedrockAge
 These were in the original design but the v1 fleet takes a simpler path:
 
 - **Credentials**: stored in SSM Parameter Store (SecureString). Each agent's runtime role has narrow `ssm:GetParameter` access to the paths it needs. This works today with no Identity directory setup.
-- **MCP endpoints**: agents connect directly to the vendor MCP servers via `streamablehttp_client`, not through a Gateway proxy. One fewer hop to debug, and the OAuth dance is handled per-tenant by `scripts/bootstrap_asana_oauth.py`.
-- **Memory**: the agents honor an `AGENTCORE_MEMORY_ID` environment variable (the Strands `AgentCoreMemoryToolProvider` is wired up) but no Memory resource is provisioned by the fleet's infra template. Teams that want memory today provision their own Memory resource and pass the ID to the runtime; a shipped-out-of-the-box memory layer is a roadmap item.
+- **MCP endpoints**: agents connect directly to the vendor MCP servers via Strands' `MCPClient(url=...)`, not through a Gateway proxy. One fewer hop to debug, and the OAuth dance is handled per-tenant by `scripts/bootstrap_asana_oauth.py`.
+- **Memory**: the agents honor an `AGENTCORE_MEMORY_ID` environment variable (a Strands `MemoryManager` with `AgentCoreMemoryStore` is wired up) but no Memory resource is provisioned by the fleet's infra template. Teams that want memory today provision their own Memory resource and pass the ID to the runtime; a shipped-out-of-the-box memory layer is a roadmap item.
 
 The simpler path ships today. Gateway/Identity/Memory are natural upgrades when the operational story for them solidifies.
 
